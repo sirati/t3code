@@ -24,6 +24,8 @@ import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as HttpServer from "effect/http/HttpServer";
+import * as NetAddress from "effect/net/NetAddress";
 
 import * as ServerConfig from "./config.ts";
 import * as ServiceLauncherClient from "./cloud/serviceLauncherClient.ts";
@@ -653,6 +655,19 @@ const make = Effect.fn("serverRuntimeStartup.make")(function* (options?: Startup
     yield* Effect.logDebug("startup phase: waiting for http listener");
     yield* runStartupPhase("http.wait", Deferred.await(httpListening));
     yield* runStartupPhase("auxiliary-roots.parked", options?.awaitAuxiliaryParked ?? Effect.void);
+    if (Option.isSome(sessionAdoption)) {
+      const { address } = yield* HttpServer.HttpServer;
+      const host = NetAddress.isInetAddress(address)
+        ? NetAddress.isUnspecified(address.address)
+          ? "127.0.0.1"
+          : NetAddress.formatUrlHostString(NetAddress.formatIp(address.address))
+        : "127.0.0.1";
+      const port = NetAddress.isInetAddress(address) ? address.port : 80;
+      yield* runStartupPhase(
+        "provider-host.ingress.activate",
+        sessionAdoption.value.activate(`http://${host}:${port}/mcp`),
+      );
+    }
 
     const updateOutcome = yield* launcher.prepareTrial;
 

@@ -125,6 +125,7 @@ it.effect.each([
         scenario === "retained-adoption"
           ? Layer.succeed(ProviderSessionAdoption.ProviderSessionAdoption, {
               prepareForShutdown: Effect.void,
+              activate: () => recordPhase("activate"),
               prepare: recordPhase("prepare").pipe(
                 Effect.as({
                   resumeReplay: recordPhase("replay"),
@@ -245,7 +246,7 @@ it.effect.each([
         assert.deepEqual(
           adoptionPhases,
           scenario === "retained-adoption"
-            ? ["prepare", "recover", "replay", "startup"]
+            ? ["prepare", "recover", "replay", "startup", "activate"]
             : ["recover"],
         );
         assert.equal(Exit.isSuccess(ready), scenario !== "project-failure");

@@ -6,6 +6,9 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as ProviderSessionAdoption from "../provider/ProviderSessionAdoption.ts";
 import * as ProviderSessionTransport from "../provider/ProviderSessionTransport.ts";
+import * as ProviderPrivateTransport from "../provider/ProviderPrivateTransport.ts";
+import * as ProviderContinuationRpc from "../provider/ProviderContinuationRpc.ts";
+import * as ProviderContinuationDispatcher from "./ProviderContinuationDispatcher.ts";
 import * as RetainedProviderWork from "./RetainedProviderWork.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as OrchestrationCommandReceipts from "../persistence/OrchestrationCommandReceipts.ts";
@@ -362,24 +365,38 @@ export const layer = Layer.mergeAll(
 );
 
 const layerSessionAdoptionProvided = Layer.unwrap(
-  Effect.map(Effect.serviceOption(ProviderSessionTransport.ProviderSessionClient), (client) =>
-    Option.isSome(client)
-      ? ProviderSessionAdoption.layer.pipe(
-          Layer.provide(
-            Layer.succeed(ProviderSessionTransport.ProviderSessionClient, client.value),
+  Effect.gen(function* () {
+    const client = yield* Effect.serviceOption(ProviderSessionTransport.ProviderSessionClient);
+    const transport = yield* Effect.serviceOption(ProviderPrivateTransport.HostTransportConfig);
+    if (Option.isNone(client) || Option.isNone(transport)) return Layer.empty;
+    return Layer.merge(
+      ProviderSessionAdoption.layer,
+      ProviderContinuationRpc.layerServer.pipe(
+        Layer.provide(
+          ProviderContinuationDispatcher.layer.pipe(
+            Layer.provide(Layer.merge(layerThreadManagementProvided, IdAllocator.layer)),
           ),
-          Layer.provide(
-            Layer.mergeAll(
-              layerProviderSessionManagerProvided,
-              layerProviderTurnStartServiceProvided,
-              ProjectionStore.layer,
-              EffectOutbox.layer,
-            ),
+        ),
+        Layer.provide(
+          Layer.succeed(
+            ProviderPrivateTransport.HostTransportConfig,
+            ProviderPrivateTransport.continuationConfig(transport.value),
           ),
-          Layer.provide(layerProjectService),
-        )
-      : Layer.empty,
-  ),
+        ),
+      ),
+    ).pipe(
+      Layer.provide(Layer.succeed(ProviderSessionTransport.ProviderSessionClient, client.value)),
+      Layer.provide(
+        Layer.mergeAll(
+          layerProviderSessionManagerProvided,
+          layerProviderTurnStartServiceProvided,
+          ProjectionStore.layer,
+          EffectOutbox.layer,
+        ),
+      ),
+      Layer.provide(layerProjectService),
+    );
+  }),
 );
 
 export const layerProduction = Layer.mergeAll(

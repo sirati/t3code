@@ -88,6 +88,9 @@ import * as GitManager from "./git/GitManager.ts";
 import * as EnvironmentTheme from "./environmentTheme.ts";
 import * as Keybindings from "./keybindings.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
+import * as HostedProviderSessionBackend from "./provider/HostedProviderSessionBackend.ts";
+import * as ProviderPrivateTransport from "./provider/ProviderPrivateTransport.ts";
+import * as ProviderSessionTransport from "./provider/ProviderSessionTransport.ts";
 import * as ServerOwnership from "./serverOwnership.ts";
 import * as AgentAwarenessRelay from "./relay/AgentAwarenessRelay.ts";
 import { hasCloudPublicConfig } from "./cloud/publicConfig.ts";
@@ -646,7 +649,19 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   ),
 );
 
+const layerHostedProviderBackend = Layer.unwrap(
+  Effect.map(Effect.serviceOption(ProviderPrivateTransport.HostTransportConfig), (config) =>
+    Option.isSome(config)
+      ? HostedProviderSessionBackend.layer.pipe(
+          Layer.provideMerge(ProviderSessionTransport.layerClient),
+          Layer.provide(Layer.succeed(ProviderPrivateTransport.HostTransportConfig, config.value)),
+        )
+      : Layer.empty,
+  ),
+);
+
 const layerRuntimeCoreDependencies = layerRuntimeCoreDependenciesBase.pipe(
+  Layer.provideMerge(layerHostedProviderBackend),
   Layer.provideMerge(layerPtyAdapter),
   Layer.provideMerge(AcpRegistrySupport.layerFromHost.pipe(Layer.provide(ProviderHostLive.layer))),
   Layer.provideMerge(

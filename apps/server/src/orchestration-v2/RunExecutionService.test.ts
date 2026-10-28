@@ -2971,8 +2971,60 @@ it.effect("keeps completed runs completed when pull request refresh fails", () =
   }),
 );
 
+it.effect(
+  "adopts an existing provider turn without starting a model or capturing a new baseline",
+  () =>
+    Effect.gen(function* () {
+      const { observed } = yield* captureRootRunTermination({
+        key: "handover:existing-turn",
+        adoptExistingTurn: { lifecycleEvents: [] },
+        captureBaseline: Effect.die("must retain the original checkpoint baseline"),
+        appContext: Effect.die("must not rebuild a prompt for an existing turn"),
+        shouldStartProviderTurn: () => Effect.die("must not request permission for a new turn"),
+        shouldFinalizeRun: () => Effect.succeed(true),
+        startTurn: () => Effect.die("must not execute a model during adoption"),
+        interruptTurn: () => Effect.die("must not interrupt the retained model"),
+        events: (ids) => Stream.make(rootTerminalEvent(ids, "completed")),
+      });
+      assert.deepEqual(observed, ["run:waiting", "pull-requests-refreshed"]);
+    }),
+);
+
+it.effect("retains unfinished background work when adopting an already completed root turn", () =>
+  Effect.gen(function* () {
+    const key = "handover:background-command";
+    const ids = backgroundScenarioIds(key);
+    const ingested = yield* Ref.make<ReadonlyArray<string>>([]);
+    const { observed } = yield* captureRootRunTermination({
+      key,
+      adoptExistingTurn: {
+        lifecycleEvents: [
+          backgroundTurnItemEvent(ids, "command_execution", "running", 1),
+          rootTerminalEvent(ids, "completed"),
+        ],
+      },
+      shouldFinalizeRun: () => Effect.die("the completed root turn must not finalize twice"),
+      startTurn: () => Effect.die("must not restart the model"),
+      events: () =>
+        Stream.make(
+          rootTerminalEvent(ids, "completed"),
+          backgroundTurnItemEvent(ids, "command_execution", "completed", 2),
+        ),
+      ingestNormalized: (input) =>
+        Ref.update(ingested, (events) => [
+          ...events,
+          input.event.type === "turn_item.updated" ? input.event.turnItem.status : input.event.type,
+        ]).pipe(Effect.as([])),
+    });
+    assert.include(yield* Ref.get(ingested), "completed");
+    assert.deepEqual(observed, []);
+  }),
+);
+
 function captureRootRunTermination(input: {
   readonly key: string;
+  readonly adoptExistingTurn?: RunExecutionService.RunExecutionServiceV2StartRootRunInput["adoptExistingTurn"];
+  readonly captureBaseline?: Effect.Effect<void>;
   readonly shouldFinalizeRun: () => Effect.Effect<boolean, ProjectionStore.ProjectionStoreV2Error>;
   readonly rejectTerminalWrite?: boolean;
   readonly hasUnpairedRunInterruptRequest?: () => Effect.Effect<boolean, never>;
@@ -3038,7 +3090,9 @@ function captureRootRunTermination(input: {
           Layer.mock(McpAppModelContext.McpAppModelContext)({
             forThread: () => input.appContext ?? Effect.succeed([]),
           }),
-          Layer.mock(CheckpointService.CheckpointServiceV2)({ captureBaseline: () => Effect.void }),
+          Layer.mock(CheckpointService.CheckpointServiceV2)({
+            captureBaseline: () => input.captureBaseline ?? Effect.void,
+          }),
           layerTurnItemPositionsTest,
           Layer.mock(EventSink.EventSinkV2)({
             write: (payload) =>
@@ -3093,6 +3147,9 @@ function captureRootRunTermination(input: {
     const previewActivityEnded = yield* Effect.gen(function* () {
       const runExecution = yield* RunExecutionService.RunExecutionServiceV2;
       const start = runExecution.startRootRun({
+        ...(input.adoptExistingTurn === undefined
+          ? {}
+          : { adoptExistingTurn: input.adoptExistingTurn }),
         commandId: CommandId.make(`command:${input.key}`),
         appThread: rootAppThread(ids.threadId),
         providerSessionId: ProviderSessionId.make(`session:${input.key}`),

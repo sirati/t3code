@@ -703,6 +703,50 @@ const layerRuntimeDependencies = layerRuntimeCoreDependencies.pipe(
   Layer.provide(NetService.layer),
 );
 
+export const layerProviderSessionInfrastructure =
+  ProviderAdapterRegistry.layerFromProviderInstanceRegistry.pipe(
+    Layer.provideMerge(ProviderInstanceRegistryHydration.layer),
+    Layer.provideMerge(layerPortScanner),
+    Layer.provideMerge(
+      Layer.mergeAll(
+        AntigravityInstallation.AntigravityInstallation.layer,
+        CodexInstallation.CodexInstallation.layer,
+      ),
+    ),
+    Layer.provideMerge(layerPtyAdapter),
+    Layer.provideMerge(
+      Layer.mergeAll(
+        layerProviderEventLoggers,
+        ModelManifest.layerModelCatalog.pipe(Layer.provideMerge(ModelManifest.layer)),
+        ResetCreditCoordinator.layer,
+        ProviderLatestVersions.layer,
+        McpProviderSessions.layer,
+      ),
+    ),
+    Layer.provideMerge(
+      OpenCodeRuntime.layer.pipe(
+        Layer.provide(
+          Layer.unwrap(
+            Effect.gen(function* () {
+              const config = yield* ServerConfig.ServerConfig;
+              return OpenCodeServerLedger.layer({ stateDir: config.stateDir });
+            }),
+          ),
+        ),
+      ),
+    ),
+    Layer.provideMerge(CodexManagedTokenBroker.layer),
+    Layer.provideMerge(layerServerEnvironment),
+    Layer.provideMerge(layerBackground),
+    Layer.provideMerge(layerServerSettings),
+    Layer.provideMerge(ServerSecretStore.layer),
+    Layer.provide(layerResourceAttribution),
+    Layer.provide(FetchHttpClient.layer),
+    Layer.provide(AgentScopeLive.layer),
+    Layer.provide(ProcessRunner.layer),
+    Layer.provide(layerPlatformServices),
+  );
+
 const layerCommandReadiness = HttpRouter.middleware(
   (httpEffect) =>
     Effect.flatMap(ServerRuntimeStartup.ServerRuntimeStartup, (startup) =>

@@ -1,0 +1,131 @@
+import { EnvironmentId, ProviderInstanceId, ProviderSessionId, ThreadId } from "@t3tools/contracts";
+import * as Adapter from "@t3tools/provider-core/server/ProviderAdapter";
+import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
+import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
+import * as Rpc from "effect/rpc/Rpc";
+import * as RpcGroup from "effect/rpc/RpcGroup";
+import * as RpcMiddleware from "effect/rpc/RpcMiddleware";
+import * as ProviderSessionHost from "./ProviderSessionHost.ts";
+import { ProviderSessionEnvelope } from "./ProviderSessionJournal.ts";
+import { OpenHostedSessionInput, sessionMethods } from "./ProviderSessionMethods.ts";
+
+const isAdapterError = Schema.is(Adapter.ProviderAdapterV2Error);
+const sequenceCursor = Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0));
+
+export class HostAuthorizationError extends Schema.TaggedError<HostAuthorizationError>()(
+  "HostAuthorizationError",
+  {},
+) {}
+
+export class HostAuthorization extends RpcMiddleware.Service<HostAuthorization>()(
+  "t3/provider/HostAuthorization",
+  { error: HostAuthorizationError },
+) {}
+const ownedSession = { sessionId: ProviderSessionId, lease: Schema.String };
+const error = Schema.Union([
+  ProviderSessionHost.ProviderSessionHostError,
+  Adapter.ProviderAdapterV2Error,
+]);
+const methodNames = Object.keys(sessionMethods) as Array<keyof typeof sessionMethods>;
+const mcpConfig = Schema.Struct({
+  environmentId: EnvironmentId,
+  threadId: ThreadId,
+  providerSessionId: Schema.String,
+  providerInstanceId: ProviderInstanceId,
+  endpoint: Schema.String,
+  authorizationHeader: Schema.String,
+  browserToolsAvailable: Schema.Boolean,
+  capabilities: Schema.optionalKey(Schema.Array(Schema.String)),
+  agentDeviceEnvironment: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
+});
+
+export const ProviderSessionRpc = RpcGroup.make(
+  Rpc.make("session.open", {
+    payload: Schema.Struct({
+      instanceId: ProviderInstanceId,
+      input: Schema.toCodecJson(OpenHostedSessionInput),
+      mcp: Schema.optionalKey(mcpConfig),
+    }),
+    success: Schema.toCodecJson(ProviderSessionHost.HostedProviderSession),
+    error,
+  }),
+  Rpc.make("session.list", {
+    payload: Schema.Struct({}),
+    success: Schema.Array(Schema.toCodecJson(ProviderSessionHost.HostedProviderSession)),
+    error,
+  }),
+  Rpc.make("session.attach", {
+    payload: Schema.Struct(ownedSession),
+    success: Schema.toCodecJson(ProviderSessionHost.HostedProviderSession),
+    error,
+  }),
+  Rpc.make("session.detach", { payload: Schema.Struct(ownedSession), success: Schema.Void, error }),
+  Rpc.make("session.close", { payload: Schema.Struct(ownedSession), success: Schema.Void, error }),
+  Rpc.make("session.acknowledge", {
+    payload: Schema.Struct({ ...ownedSession, through: sequenceCursor }),
+    success: Schema.Void,
+    error,
+  }),
+  Rpc.make("session.events", {
+    payload: Schema.Struct({ ...ownedSession, after: sequenceCursor }),
+    success: Schema.toCodecJson(ProviderSessionEnvelope),
+    error,
+    stream: true,
+  }),
+  Rpc.make("session.invoke", {
+    payload: Schema.Struct({
+      ...ownedSession,
+      method: Schema.Literals(methodNames),
+      argument: Schema.Unknown,
+      mcp: Schema.optionalKey(Schema.Array(mcpConfig)),
+    }),
+    success: Schema.Unknown,
+    error,
+  }),
+).middleware(HostAuthorization);
+
+export const layer = ProviderSessionRpc.toLayer(
+  Effect.gen(function* () {
+    const host = yield* ProviderSessionHost.ProviderSessionHost;
+    const mcp = yield* McpProviderSessions.McpProviderSessions;
+    const configureMcp = (config: typeof mcpConfig.Type) => {
+      const { capabilities, ...fields } = config;
+      return mcp.set({
+        ...fields,
+        ...(capabilities === undefined ? {} : { capabilities: new Set(capabilities) }),
+      });
+    };
+    return ProviderSessionRpc.of({
+      // The RPC middleware owns the request span.
+      "session.open": Effect.fnUntraced(function* (request) {
+        if (request.mcp) yield* configureMcp(request.mcp);
+        return yield* host.open(request.instanceId, request.input);
+      }),
+      "session.list": () => host.list,
+      "session.attach": (request) => host.attach(request.sessionId, request.lease),
+      "session.detach": (request) => host.detach(request.sessionId, request.lease),
+      "session.close": (request) => host.close(request.sessionId, request.lease),
+      "session.acknowledge": (request) =>
+        host.acknowledge(request.sessionId, request.lease, request.through),
+      "session.events": (request) => host.events(request.sessionId, request.lease, request.after),
+      "session.invoke": (request) =>
+        host.withRuntime(request.sessionId, request.lease, (runtime) =>
+          Effect.gen(function* () {
+            for (const config of request.mcp ?? []) yield* configureMcp(config);
+            return yield* sessionMethods[request.method].invoke(runtime, request.argument).pipe(
+              Effect.mapError((cause) =>
+                isAdapterError(cause)
+                  ? cause
+                  : new Adapter.ProviderAdapterProtocolError({
+                      driver: runtime.driver,
+                      detail: "Invalid hosted provider operation payload.",
+                      cause,
+                    }),
+              ),
+            );
+          }),
+        ),
+    });
+  }),
+);

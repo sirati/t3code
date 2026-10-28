@@ -793,16 +793,24 @@ export const layer: Layer.Layer<
       const tokenCap = yield* handoffTokenCapConfig.pipe(
         Effect.orElseSucceed(() => DEFAULT_HANDOFF_TOKEN_CAP),
       );
+      const measuredContext = latestNativeContextUsage(projection, providerThread);
+      const previousSelection =
+        measuredContext?.modelSelection ??
+        projection.runs.findLast(
+          (source) =>
+            source.ordinal < run.ordinal &&
+            source.startedAt !== null &&
+            source.providerThreadId === providerThread.id,
+        )?.modelSelection;
+      const contextPolicy =
+        session.readContextPolicy === undefined
+          ? undefined
+          : yield* session.readContextPolicy({
+              previous: previousSelection ?? null,
+              next: run.modelSelection,
+              cwd: resolvedRuntimePolicy.cwd,
+            });
       const handoffContextForThread = (loadedProviderThread: OrchestrationV2ProviderThread) => {
-        const measuredContext = latestNativeContextUsage(projection, providerThread);
-        const previousSelection =
-          measuredContext?.modelSelection ??
-          projection.runs.findLast(
-            (source) =>
-              source.ordinal < run.ordinal &&
-              source.startedAt !== null &&
-              source.providerThreadId === providerThread.id,
-          )?.modelSelection;
         const sameSelection =
           previousSelection === undefined ||
           modelSelectionsEqual(previousSelection, run.modelSelection);
@@ -816,11 +824,12 @@ export const layer: Layer.Layer<
         const reuseTelemetry =
           sameSelection ||
           (previousSelection !== undefined &&
-            session.canReuseContextUsage?.(previousSelection, run.modelSelection) === true);
-        const knownModelWindow = session.getModelContextWindow?.(
-          run.modelSelection,
-          resolvedRuntimePolicy.cwd,
-        );
+            (contextPolicy?.reusable ??
+              session.canReuseContextUsage?.(previousSelection, run.modelSelection)) === true);
+        const knownModelWindow =
+          contextPolicy === undefined
+            ? session.getModelContextWindow?.(run.modelSelection, resolvedRuntimePolicy.cwd)
+            : (contextPolicy.modelWindow ?? undefined);
         const handoffUsage = contextUsageForHandoff({
           sameNativeThread,
           sameSelection,

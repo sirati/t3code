@@ -2,6 +2,7 @@ import { assert, it } from "@effect/vitest";
 import {
   ProviderInstanceId,
   ProviderSessionId,
+  ProviderThreadId,
   RunAttemptId,
   RunId,
   ThreadId,
@@ -160,6 +161,11 @@ it.effect.each(["success", "missing-attempt", "consumer-failure"] as const)(
                     }),
                 }),
                 Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+                  adoptTurn: (input) =>
+                    Effect.sync(() => {
+                      assert.equal(input.providerThreadId, "retained-native-thread");
+                      assert.equal(input.runOrdinal, 1);
+                    }),
                   open: (input) =>
                     Effect.sync(() => {
                       assert.equal(order[0], "credentials");
@@ -187,6 +193,9 @@ it.effect.each(["success", "missing-attempt", "consumer-failure"] as const)(
                 Layer.mock(ProjectionStore.ProjectionStoreV2)({
                   getThreadProjection: (threadId) =>
                     Effect.succeed({
+                      runs: entries
+                        .find((entry) => entry.openInput.threadId === threadId)!
+                        .runConsumers.map((consumer) => ({ id: consumer.runId, ordinal: 1 })),
                       attempts:
                         scenario === "missing-attempt"
                           ? []
@@ -195,6 +204,7 @@ it.effect.each(["success", "missing-attempt", "consumer-failure"] as const)(
                               .runConsumers.map((consumer) => ({
                                 id: consumer.attemptId,
                                 runId: consumer.runId,
+                                providerThreadId: ProviderThreadId.make("retained-native-thread"),
                                 providerTurnId: null,
                               })),
                       providerTurns: [],

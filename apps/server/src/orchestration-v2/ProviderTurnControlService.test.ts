@@ -271,6 +271,7 @@ it.effect(
         ProviderSessionManager.ProviderSessionManagerV2,
         ProviderSessionManager.ProviderSessionManagerV2.of({
           shutdown: Effect.void,
+          adoptTurn: () => Effect.void,
           open: () => Effect.die("unused open"),
           get: (providerSessionId) =>
             Effect.succeed(

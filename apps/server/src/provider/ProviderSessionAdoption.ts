@@ -78,7 +78,8 @@ const make = Effect.gen(function* () {
           const attempt = projection.attempts.find(
             (attempt) => attempt.id === consumer.attemptId && attempt.runId === consumer.runId,
           );
-          if (attempt === undefined)
+          const run = projection.runs.find((run) => run.id === consumer.runId);
+          if (attempt === undefined || run === undefined)
             return yield* failure("A retained consumer has no persisted attempt.");
           const terminal = descriptor.lastTerminals.find(
             (terminal) => terminal.providerTurnId === attempt.providerTurnId,
@@ -98,6 +99,12 @@ const make = Effect.gen(function* () {
           );
           if (!admitted && !persistedTerminal)
             return yield* failure("A retained consumer has no admitted startup operation.");
+          if (!persistedTerminal)
+            yield* sessions.adoptTurn({
+              providerSessionId: runtime.providerSessionId,
+              providerThreadId: attempt.providerThreadId,
+              runOrdinal: run.ordinal,
+            });
           const ready = yield* Deferred.make<
             void,
             ProviderTurnStartService.ProviderTurnStartError

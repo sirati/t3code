@@ -147,6 +147,11 @@ export type ProviderSessionManagerV2Error = typeof ProviderSessionManagerV2Error
 
 export interface ProviderSessionManagerV2Shape {
   readonly shutdown: Effect.Effect<void>;
+  readonly adoptTurn: (input: {
+    readonly providerSessionId: ProviderSessionId;
+    readonly providerThreadId: ProviderThreadId;
+    readonly runOrdinal: number;
+  }) => Effect.Effect<void, ProviderSessionManagerV2Error>;
   readonly open: (input: {
     readonly threadId: ThreadId;
     readonly providerSessionId: ProviderSessionId;
@@ -2155,6 +2160,9 @@ export const layerWithOptions = (
 
       return ProviderSessionManagerV2.of({
         shutdown,
+        adoptTurn: Effect.fn("ProviderSessionManager.adoptTurn")((input) =>
+          markBusy(input.providerSessionId, busyTurnKey(input.providerThreadId, input.runOrdinal)),
+        ),
         open: (input) =>
           sessionOpen.withLock(
             input.providerSessionId,

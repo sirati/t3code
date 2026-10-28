@@ -3021,6 +3021,42 @@ it.effect("retains unfinished background work when adopting an already completed
   }),
 );
 
+it.effect("releases a settled adopted consumer once its journal replay is acknowledged", () =>
+  Effect.gen(function* () {
+    const key = "handover:empty-replay";
+    const caughtUp = yield* Deferred.make<void>();
+    let released = false;
+    const result = yield* captureRootRunTermination({
+      key,
+      adoptExistingTurn: {
+        lifecycleEvents: [rootTerminalEvent(backgroundScenarioIds(key), "completed")],
+      },
+      shouldFinalizeRun: () => Effect.die("must retain the committed terminal state"),
+      startTurn: () => Effect.die("must not start another model turn"),
+      events: () => Stream.never,
+      eventDelivery: {
+        receiptFor: () => undefined,
+        acknowledge: () => Effect.void,
+        resume: Effect.void,
+        awaitCaughtUp: Deferred.await(caughtUp),
+        releaseRunConsumer: () =>
+          Effect.sync(() => {
+            released = true;
+          }),
+      },
+      afterStart: (closed) =>
+        Effect.gen(function* () {
+          assert.isFalse(yield* Deferred.isDone(closed));
+          assert.isFalse(released);
+          yield* Deferred.succeed(caughtUp, undefined);
+        }),
+    });
+    assert.isTrue(released);
+    assert.isTrue(result.previewActivityEnded);
+    assert.isEmpty(result.finalEvents);
+  }),
+);
+
 function captureRootRunTermination(input: {
   readonly key: string;
   readonly adoptExistingTurn?: RunExecutionService.RunExecutionServiceV2StartRootRunInput["adoptExistingTurn"];
@@ -3809,6 +3845,7 @@ it.effect(
       >();
       const completed = new Set<number>();
       const order: string[] = [];
+      const released = yield* Deferred.make<void>();
       yield* captureRootRunTermination({
         key: "handover:consumer-ack",
         adoptExistingTurn: { lifecycleEvents: [] },
@@ -3826,6 +3863,15 @@ it.effect(
           receiptFor: (event) => receipts.get(event),
           acknowledge: () => Effect.die("only the session manager acknowledges the host"),
           resume: Effect.void,
+          retainRunConsumer: (consumer) =>
+            Effect.sync(() => {
+              assert.equal(consumer.runId, backgroundScenarioIds("handover:consumer-ack").runId);
+              order.push("retain");
+            }),
+          releaseRunConsumer: () =>
+            Effect.sync(() => {
+              order.push("release");
+            }).pipe(Effect.andThen(Deferred.succeed(released, undefined)), Effect.asVoid),
         },
         readProviderReceipt: (key) =>
           Effect.sync(() =>
@@ -3858,7 +3904,9 @@ it.effect(
             return true;
           }),
       });
+      yield* Deferred.await(released);
       assert.deepEqual(order, [
+        "retain",
         "ingest:1",
         "persist:1",
         "ack:1",
@@ -3867,6 +3915,36 @@ it.effect(
         "finalize",
         "persist:2",
         "ack:2",
+        "release",
       ]);
     }),
+);
+
+it.effect("retains the hosted run manifest when core shutdown interrupts ingestion", () =>
+  Effect.gen(function* () {
+    const retained: ProviderAdapter.ProviderAdapterV2RunConsumer[] = [];
+    const released: ProviderAdapter.ProviderAdapterV2RunConsumer[] = [];
+    const observed = yield* captureRootRunTermination({
+      key: "handover:interrupted-consumer",
+      adoptExistingTurn: { lifecycleEvents: [] },
+      shouldFinalizeRun: () => Effect.die("must not finalize an interrupted consumer"),
+      events: () => Stream.fromEffect(Effect.interrupt),
+      eventDelivery: {
+        receiptFor: () => undefined,
+        acknowledge: () => Effect.void,
+        resume: Effect.void,
+        retainRunConsumer: (consumer) =>
+          Effect.sync(() => {
+            retained.push(consumer);
+          }),
+        releaseRunConsumer: (consumer) =>
+          Effect.sync(() => {
+            released.push(consumer);
+          }),
+      },
+    });
+    assert.lengthOf(retained, 1);
+    assert.isEmpty(released);
+    assert.isEmpty(observed.finalEvents);
+  }),
 );

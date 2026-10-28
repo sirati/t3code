@@ -85,6 +85,15 @@ export const ProviderSessionRpc = RpcGroup.make(
     error,
   }),
   Rpc.make("session.detach", { payload: Schema.Struct(ownedSession), success: Schema.Void, error }),
+  Rpc.make("session.runConsumer", {
+    payload: Schema.Struct({
+      ...ownedSession,
+      consumer: Adapter.ProviderAdapterV2RunConsumer,
+      retained: Schema.Boolean,
+    }),
+    success: Schema.Void,
+    error,
+  }),
   Rpc.make("session.close", { payload: Schema.Struct(ownedSession), success: Schema.Void, error }),
   Rpc.make("session.acknowledge", {
     payload: Schema.Struct({ ...ownedSession, through: sequenceCursor }),
@@ -155,6 +164,8 @@ export const layer = ProviderSessionRpc.toLayer(
       "session.list": () => host.list,
       "session.attach": (request) => host.attach(request.sessionId, request.lease),
       "session.detach": (request) => host.detach(request.sessionId, request.lease),
+      "session.runConsumer": (request) =>
+        host.setRunConsumer(request.sessionId, request.lease, request.consumer, request.retained),
       "session.close": (request) => host.close(request.sessionId, request.lease),
       "session.acknowledge": (request) =>
         host.acknowledge(request.sessionId, request.lease, request.through),

@@ -75,6 +75,13 @@ export const ProviderAdapterV2SessionStatus = Schema.Literals([
 ]);
 export type ProviderAdapterV2SessionStatus = typeof ProviderAdapterV2SessionStatus.Type;
 
+export const ProviderAdapterV2RunConsumer = Schema.Struct({
+  threadId: ThreadId,
+  runId: RunId,
+  attemptId: RunAttemptId,
+});
+export type ProviderAdapterV2RunConsumer = typeof ProviderAdapterV2RunConsumer.Type;
+
 export const ProviderAdapterV2TerminalEvent = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("turn.terminal"),
@@ -561,6 +568,12 @@ export interface ProviderAdapterV2SessionRuntime {
     readonly acknowledge: (through: number) => Effect.Effect<void, ProviderAdapterV2Error>;
     readonly resume: Effect.Effect<void>;
     readonly awaitCaughtUp?: Effect.Effect<void>;
+    readonly retainRunConsumer?: (
+      consumer: ProviderAdapterV2RunConsumer,
+    ) => Effect.Effect<void, ProviderAdapterV2Error>;
+    readonly releaseRunConsumer?: (
+      consumer: ProviderAdapterV2RunConsumer,
+    ) => Effect.Effect<void, ProviderAdapterV2Error>;
   };
   /** Manager runtimes broadcast independent subscriptions; adapters may expose only a single-consumer stream. */
   readonly subscribeEvents?: Effect.Effect<ProviderAdapterV2EventSubscription>;

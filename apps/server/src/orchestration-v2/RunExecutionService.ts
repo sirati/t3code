@@ -1314,9 +1314,22 @@ export const layer: Layer.Layer<
         // Ends once the root turn and the children it drives settle. Background commands such
         // as a dev server keep this consumer alive afterwards and must not pin preview focus.
         const endPreviewActivity = yield* previewAgentActivity.begin(input.run.threadId);
-        const providerEventFiber = yield* eventSubscription.events.pipe(
+        const hostedRunConsumer: ProviderAdapter.ProviderAdapterV2RunConsumer = {
+          threadId: input.run.threadId,
+          runId: input.run.id,
+          attemptId: input.attempt.id,
+        };
+        const replayCaughtUp = input.session.eventDelivery?.awaitCaughtUp;
+        const consumerEvents =
+          input.adoptExistingTurn === undefined || replayCaughtUp === undefined
+            ? eventSubscription.events
+            : eventSubscription.events.pipe(
+                Stream.merge(Stream.fromEffect(replayCaughtUp).pipe(Stream.map(() => null))),
+              );
+        const providerEventTask = consumerEvents.pipe(
           Stream.mapEffect((event) =>
             Effect.gen(function* () {
+              if (event === null) return { event, accepted: false };
               const processedReceipt = receiptFor(event, "consumer-complete");
               if (
                 processedReceipt !== undefined &&
@@ -1398,7 +1411,7 @@ export const layer: Layer.Layer<
           ),
           Stream.tap(({ event, accepted }) =>
             Effect.gen(function* () {
-              if (!accepted) return;
+              if (!accepted || event === null) return;
               if (
                 event.type === "provider_turn.updated" &&
                 event.providerTurn.runAttemptId === input.attempt.id &&
@@ -1502,6 +1515,7 @@ export const layer: Layer.Layer<
           Stream.tap(({ event }) =>
             Effect.gen(function* () {
               if (yield* agentTurnsSettled) yield* endPreviewActivity;
+              if (event === null) return;
               const providerReceipt = receiptFor(event, "consumer-complete");
               if (providerReceipt !== undefined)
                 yield* eventSink.write({ events: [], providerReceipt });
@@ -1638,9 +1652,42 @@ export const layer: Layer.Layer<
                 );
               }),
           ),
+          Effect.onExit((exit) =>
+            Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)
+              ? Effect.void
+              : (
+                  input.session.eventDelivery?.releaseRunConsumer?.(hostedRunConsumer) ??
+                  Effect.void
+                ).pipe(
+                  Effect.catchCause(() =>
+                    Effect.logWarning("Could not release hosted run consumer", {
+                      runId: input.run.id,
+                      attemptId: input.attempt.id,
+                    }),
+                  ),
+                ),
+          ),
           Effect.ensuring(endPreviewActivity),
           Effect.ensuring(eventSubscription.close),
-          Effect.forkDetach,
+          Effect.interruptible,
+        );
+        const providerEventFiber = yield* Effect.gen(function* () {
+          yield* (
+            input.session.eventDelivery?.retainRunConsumer?.(hostedRunConsumer) ?? Effect.void
+          ).pipe(
+            Effect.mapError(
+              (cause) =>
+                new RunExecutionStartError({
+                  commandId: input.commandId,
+                  runId: input.run.id,
+                  cause,
+                }),
+            ),
+          );
+          return yield* providerEventTask.pipe(Effect.forkDetach);
+        }).pipe(
+          Effect.uninterruptible,
+          Effect.onError(() => eventSubscription.close.pipe(Effect.andThen(endPreviewActivity))),
         );
 
         // A provider turn is a sign that the session is still alive. Keep

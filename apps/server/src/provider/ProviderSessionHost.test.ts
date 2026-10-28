@@ -17,6 +17,8 @@ import {
   ProviderSessionId,
   ProviderThreadId,
   ProviderTurnId,
+  RunId,
+  RunAttemptId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -260,6 +262,11 @@ it.live(
             lastAliveAt: 1010,
           },
         ];
+        const runConsumer = {
+          threadId: input.threadId,
+          runId: RunId.make("retained-run"),
+          attemptId: RunAttemptId.make("retained-attempt"),
+        };
         const firstConnection = yield* Effect.gen(function* () {
           const client = yield* ProviderSessionTransport.ProviderSessionClient;
           yield* client["mcp.checkpoint"]({ credentials });
@@ -285,6 +292,9 @@ it.live(
           };
           yield* mcpSessions.set(mcpConfig);
           const remote = yield* ProviderSessionRemoteRuntime.connect(attached);
+          yield* remote.runtime.eventDelivery!.retainRunConsumer!(runConsumer);
+          yield* remote.runtime.eventDelivery!.retainRunConsumer!(runConsumer);
+          assert.deepEqual((yield* client["session.list"]({}))[0]!.runConsumers, [runConsumer]);
           assert.isUndefined(remote.runtime.compactThread);
           yield* remote.runtime.unloadThread!({
             providerThread: OrchestrationV2ProviderThread.make({
@@ -351,6 +361,7 @@ it.live(
           assert.deepEqual(yield* client["mcp.credentials"]({}), credentials);
           assert.deepEqual((yield* client["session.list"]({}))[0]!.lastTerminals, [event]);
           const current = (yield* client["session.list"]({}))[0]!;
+          assert.deepEqual(current.runConsumers, [runConsumer]);
           const attached = yield* client["session.attach"]({ sessionId, lease: current.lease });
           assert.equal(attached.acknowledgedThrough, received.sequence);
           const remote = yield* ProviderSessionRemoteRuntime.connect(attached, {
@@ -389,6 +400,18 @@ it.live(
             lease: firstConnection.lease,
           }).pipe(Effect.result);
           assert.equal(rejected._tag, "Failure");
+          assert.equal(
+            (yield* client["session.runConsumer"]({
+              sessionId,
+              lease: firstConnection.lease,
+              consumer: runConsumer,
+              retained: false,
+            }).pipe(Effect.result))._tag,
+            "Failure",
+          );
+          assert.deepEqual((yield* client["session.list"]({}))[0]!.runConsumers, [runConsumer]);
+          yield* remote.runtime.eventDelivery!.releaseRunConsumer!(runConsumer);
+          assert.deepEqual((yield* client["session.list"]({}))[0]!.runConsumers, []);
           assert.equal(closed, 0);
           yield* client["session.close"]({ sessionId, lease: attached.lease });
         }).pipe(Effect.provide(clientLayer));

@@ -20,6 +20,7 @@ import * as EffectOutbox from "../orchestration-v2/EffectOutbox.ts";
 import * as ProviderSessionAdoption from "./ProviderSessionAdoption.ts";
 import type { HostedProviderSession } from "./ProviderSessionHost.ts";
 import * as ProviderSessionTransport from "./ProviderSessionTransport.ts";
+import * as ProviderPrivateTransport from "./ProviderPrivateTransport.ts";
 
 it.effect.each(["success", "missing-attempt", "consumer-failure"] as const)(
   "restores all consumers before replay and rejects incomplete adoption (%s)",
@@ -80,6 +81,8 @@ it.effect.each(["success", "missing-attempt", "consumer-failure"] as const)(
         yield* Deferred.succeed(startup, undefined);
         yield* Fiber.join(waiting);
         assert.equal(order.at(-1), "settled");
+        yield* service.activate("http://127.0.0.1:12345/mcp");
+        assert.deepEqual(order.slice(-2), ["continuations.route", "mcp.route"]);
         yield* service.prepareForShutdown;
         assert.deepEqual(order.slice(-5), [
           "mcp.pause",
@@ -94,6 +97,10 @@ it.effect.each(["success", "missing-attempt", "consumer-failure"] as const)(
           ProviderSessionAdoption.layer.pipe(
             Layer.provide(
               Layer.mergeAll(
+                Layer.succeed(ProviderPrivateTransport.HostTransportConfig, {
+                  endpoint: "fixture-host",
+                  token: "fixture-token-with-at-least-32-characters",
+                }),
                 Layer.mock(EffectOutbox.EffectOutboxV2)({
                   settleRetainedStarts: Effect.sync(() => {
                     order.push("settled");
@@ -102,6 +109,16 @@ it.effect.each(["success", "missing-attempt", "consumer-failure"] as const)(
                 }),
                 McpProviderSessions.layer,
                 Layer.mock(ProviderSessionTransport.ProviderSessionClient)({
+                  "continuations.route": ((input) =>
+                    Effect.sync(() => {
+                      assert.equal(input.endpoint, "fixture-host.core");
+                      order.push("continuations.route");
+                    })) as ProviderSessionTransport.ProviderSessionClient["Service"]["continuations.route"],
+                  "mcp.route": ((input) =>
+                    Effect.sync(() => {
+                      assert.equal(input.endpoint, "http://127.0.0.1:12345/mcp");
+                      order.push("mcp.route");
+                    })) as ProviderSessionTransport.ProviderSessionClient["Service"]["mcp.route"],
                   "mcp.pause": (() =>
                     Effect.sync(() => {
                       order.push("mcp.pause");

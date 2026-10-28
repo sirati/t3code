@@ -15,6 +15,7 @@ import * as ProviderSessionManager from "../orchestration-v2/ProviderSessionMana
 import * as ProviderTurnStartService from "../orchestration-v2/ProviderTurnStartService.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProviderSessionTransport from "./ProviderSessionTransport.ts";
+import * as ProviderPrivateTransport from "./ProviderPrivateTransport.ts";
 
 export class ProviderSessionAdoptionError extends Schema.TaggedError<ProviderSessionAdoptionError>()(
   "ProviderSessionAdoptionError",
@@ -36,6 +37,7 @@ export class ProviderSessionAdoption extends Context.Service<
       ProviderSessionAdoptionError
     >;
     readonly prepareForShutdown: Effect.Effect<void, ProviderSessionAdoptionError>;
+    readonly activate: (mcpEndpoint: string) => Effect.Effect<void, ProviderSessionAdoptionError>;
   }
 >()("t3/provider/ProviderSessionAdoption") {}
 
@@ -47,6 +49,7 @@ const make = Effect.gen(function* () {
   const turns = yield* ProviderTurnStartService.ProviderTurnStartServiceV2;
   const projections = yield* ProjectionStore.ProjectionStoreV2;
   const outbox = yield* EffectOutbox.EffectOutboxV2;
+  const transport = yield* Effect.serviceOption(ProviderPrivateTransport.HostTransportConfig);
   const scope = yield* Scope.Scope;
   const retainedWork = yield* Effect.serviceOption(RetainedProviderWork.RetainedProviderWork);
   const failure = (cause: unknown) => new ProviderSessionAdoptionError({ cause });
@@ -154,7 +157,15 @@ const make = Effect.gen(function* () {
         ),
       });
   }).pipe(Effect.mapError(failure));
-  return ProviderSessionAdoption.of({ prepare, prepareForShutdown });
+  const activate = Effect.fn("ProviderSessionAdoption.activate")(function* (mcpEndpoint: string) {
+    if (Option.isNone(transport))
+      return yield* failure("The provider host has no continuation transport.");
+    yield* client["continuations.route"](
+      ProviderPrivateTransport.continuationConfig(transport.value),
+    );
+    yield* client["mcp.route"]({ endpoint: mcpEndpoint });
+  }, Effect.mapError(failure));
+  return ProviderSessionAdoption.of({ prepare, prepareForShutdown, activate });
 });
 
 export const layer = Layer.effect(ProviderSessionAdoption, make);

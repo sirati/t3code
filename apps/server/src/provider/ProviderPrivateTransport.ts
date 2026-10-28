@@ -27,6 +27,13 @@ export class HostTransportConfig extends Context.Service<
   }
 >()("t3/provider/ProviderPrivateTransport/HostTransportConfig") {}
 
+export const continuationConfig = (
+  host: HostTransportConfig["Service"],
+): HostTransportConfig["Service"] => ({
+  endpoint: `${host.endpoint}.core`,
+  token: host.token,
+});
+
 export const layerAuthorization = Layer.effect(
   HostAuthorization,
   Effect.gen(function* () {

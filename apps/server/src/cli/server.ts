@@ -3,10 +3,12 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import { Command, GlobalFlag } from "effect/cli";
+import { Command, Flag, GlobalFlag } from "effect/cli";
 import * as CliError from "effect/cli/CliError";
 
 import * as ServerConfig from "../config.ts";
+import * as ProviderHostDescriptor from "../provider/ProviderHostDescriptor.ts";
+import * as ProviderPrivateTransport from "../provider/ProviderPrivateTransport.ts";
 import { awaitLauncherLoss } from "../launcherWatch.ts";
 import { runServer } from "../server.ts";
 import { type CliServerFlags, resolveServerConfig, sharedServerCommandFlags } from "./config.ts";
@@ -26,11 +28,21 @@ const runServerCommand = Effect.fn("server.runServerCommand")(function* (
     readonly startupPresentation?: ServerConfig.StartupPresentation;
     readonly forceAutoBootstrapProjectFromCwd?: boolean;
     readonly rejectRunningServer?: boolean;
+    readonly providerHostDescriptorFile?: string;
   },
 ) {
   const logLevel = yield* GlobalFlag.LogLevel;
   const config = yield* resolveServerConfig(flags, logLevel, options);
-  const run = runServer.pipe(Effect.provideService(ServerConfig.ServerConfig, config));
+  let run = runServer.pipe(Effect.provideService(ServerConfig.ServerConfig, config));
+  if (options?.providerHostDescriptorFile !== undefined) {
+    if (config.mode === "desktop")
+      return yield* new CliError.UserError({
+        cause: "desktop",
+        userMessage: "Provider handover is available only for the headless backend daemon.",
+      });
+    const transport = yield* ProviderHostDescriptor.read(options.providerHostDescriptorFile);
+    run = run.pipe(Effect.provideService(ProviderPrivateTransport.HostTransportConfig, transport));
+  }
   if (config.mode !== "desktop" || config.desktopBootstrapToken === undefined) return yield* run;
   yield* Effect.sync(() => {
     process.stdout.on("error", ignoreClosedLauncherPipe);
@@ -73,7 +85,10 @@ export const startCommand = Command.make("start", { ...sharedServerCommandFlags 
   Command.withHandler((flags) => runServerCommand(flags, { rejectRunningServer: true })),
 );
 
-export const serveCommand = Command.make("serve", { ...sharedServerCommandFlags }).pipe(
+export const serveCommand = Command.make("serve", {
+  ...sharedServerCommandFlags,
+  providerHostDescriptorFile: Flag.String("provider-host-descriptor-file").pipe(Flag.optional),
+}).pipe(
   Command.withDescription(
     "Run the T3 Code server without opening a browser and print headless pairing details.",
   ),
@@ -81,6 +96,9 @@ export const serveCommand = Command.make("serve", { ...sharedServerCommandFlags 
     runServerCommand(flags, {
       startupPresentation: "headless",
       forceAutoBootstrapProjectFromCwd: false,
+      ...(Option.isSome(flags.providerHostDescriptorFile)
+        ? { providerHostDescriptorFile: flags.providerHostDescriptorFile.value }
+        : {}),
     }),
   ),
 );

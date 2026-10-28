@@ -4,6 +4,8 @@ import { Command, Flag, GlobalFlag } from "effect/cli";
 import * as ServerConfig from "../config.ts";
 import * as ProviderSessionHostProcess from "../provider/ProviderSessionHostProcess.ts";
 import * as ProviderHostDescriptor from "../provider/ProviderHostDescriptor.ts";
+import { BackendDaemonReady } from "../backendDaemonReady.ts";
+import { reportReady, stopRequested } from "./backendDaemonReady.ts";
 import { resolveServerConfig, sharedServerCommandFlags } from "./config.ts";
 
 export const providerSessionHostCommand = Command.make("__provider-host", {
@@ -20,6 +22,8 @@ export const providerSessionHostCommand = Command.make("__provider-host", {
         forceAutoBootstrapProjectFromCwd: false,
       });
       return yield* ProviderSessionHostProcess.run.pipe(
+        Effect.raceFirst(stopRequested.pipe(Effect.andThen(Effect.interrupt))),
+        Effect.provideService(BackendDaemonReady, reportReady("host")),
         Effect.provideService(ServerConfig.ServerConfig, config),
         Effect.provideService(ProviderPrivateTransport.HostTransportConfig, transport),
       );

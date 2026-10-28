@@ -494,6 +494,7 @@ export interface ProviderAdapterV2ForkThreadInput {
 
 export interface ProviderAdapterV2EventSubscription {
   readonly events: Stream.Stream<ProviderAdapterV2Event, ProviderAdapterV2Error>;
+  readonly acknowledge?: (event: ProviderAdapterV2Event) => Effect.Effect<void>;
   readonly close: Effect.Effect<void>;
 }
 
@@ -545,6 +546,16 @@ export interface ProviderAdapterV2SessionRuntime {
   readonly providerSessionId: ProviderSessionId;
   readonly providerSession: OrchestrationV2ProviderSession;
   readonly events: Stream.Stream<ProviderAdapterV2Event, ProviderAdapterV2Error>;
+  readonly eventDelivery?: {
+    readonly receiptFor: (event: ProviderAdapterV2Event) =>
+      | {
+          readonly incarnation: string;
+          readonly sequence: number;
+        }
+      | undefined;
+    readonly acknowledge: (through: number) => Effect.Effect<void, ProviderAdapterV2Error>;
+    readonly resume: Effect.Effect<void>;
+  };
   /** Manager runtimes broadcast independent subscriptions; adapters may expose only a single-consumer stream. */
   readonly subscribeEvents?: Effect.Effect<ProviderAdapterV2EventSubscription>;
   readonly hasPendingBackgroundWork?: Effect.Effect<boolean>;

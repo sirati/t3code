@@ -1,6 +1,7 @@
 import type { ProviderSessionId } from "@t3tools/contracts";
 import * as Adapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import type { HostedProviderSession } from "./ProviderSessionHost.ts";
@@ -11,11 +12,13 @@ const isAdapterError = Schema.is(Adapter.ProviderAdapterV2Error);
 
 export const connect = Effect.fn("ProviderSessionRemoteRuntime.connect")(function* (
   descriptor: HostedProviderSession,
+  options: { readonly startPaused?: boolean } = {},
 ) {
   const client = yield* ProviderSessionTransport.ProviderSessionClient;
   const sessionId: ProviderSessionId = descriptor.providerSession.id;
   const owned = { sessionId, lease: descriptor.lease };
   const driver = descriptor.providerSession.driver;
+  let latestSession = descriptor.providerSession;
   const failure = (cause: unknown) =>
     isAdapterError(cause)
       ? cause
@@ -43,7 +46,24 @@ export const connect = Effect.fn("ProviderSessionRemoteRuntime.connect")(functio
       return yield* decode(response);
     }, Effect.mapError(failure));
   };
-  const envelopes = client["session.events"]({ ...owned, after: 0 }).pipe(Stream.mapError(failure));
+  const deliveryStarted = yield* Deferred.make<void>();
+  if (!options.startPaused) yield* Deferred.succeed(deliveryStarted, undefined);
+  const receipts = new WeakMap<
+    Adapter.ProviderAdapterV2Event,
+    { incarnation: string; sequence: number }
+  >();
+  const envelopes = Stream.fromEffect(Deferred.await(deliveryStarted)).pipe(
+    Stream.flatMap(() => client["session.events"]({ ...owned, after: 0 })),
+    Stream.map((envelope) => {
+      const event = { ...envelope.event };
+      if (event.type === "provider_session.updated") latestSession = event.providerSession;
+      receipts.set(event, { incarnation: descriptor.incarnation, sequence: envelope.sequence });
+      return { ...envelope, event };
+    }),
+    Stream.mapError(failure),
+  );
+  const acknowledge = (through: number) =>
+    client["session.acknowledge"]({ ...owned, through }).pipe(Effect.mapError(failure));
   const has = (method: string) => descriptor.methods.includes(method);
   // A transport outage must not make idle cleanup discard live provider work.
   const retainOnProbeFailure = <E>(probe: Effect.Effect<boolean, E>) =>
@@ -57,10 +77,17 @@ export const connect = Effect.fn("ProviderSessionRemoteRuntime.connect")(functio
     instanceId: descriptor.providerSession.providerInstanceId,
     driver,
     providerSessionId: sessionId,
-    providerSession: descriptor.providerSession,
+    get providerSession() {
+      return latestSession;
+    },
     readContextPolicy: bind("readContextPolicy", sessionMethods.readContextPolicy),
     ...(descriptor.backgroundTasksEndWithProcess ? { backgroundTasksEndWithProcess: true } : {}),
     events: envelopes.pipe(Stream.map((envelope) => envelope.event)),
+    eventDelivery: {
+      receiptFor: (event) => receipts.get(event),
+      acknowledge,
+      resume: Deferred.succeed(deliveryStarted, undefined).pipe(Effect.asVoid),
+    },
     ensureThread: bind("ensureThread", sessionMethods.ensureThread),
     resumeThread: bind("resumeThread", sessionMethods.resumeThread),
     startTurn: bind("startTurn", sessionMethods.startTurn),
@@ -124,8 +151,7 @@ export const connect = Effect.fn("ProviderSessionRemoteRuntime.connect")(functio
     runtime,
     envelopes,
     readContextPolicy: bind("readContextPolicy", sessionMethods.readContextPolicy),
-    acknowledge: (through: number) =>
-      client["session.acknowledge"]({ ...owned, through }).pipe(Effect.mapError(failure)),
+    acknowledge,
     detach: client["session.detach"](owned).pipe(Effect.mapError(failure)),
     close: client["session.close"](owned).pipe(Effect.mapError(failure)),
   };

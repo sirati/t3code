@@ -3024,6 +3024,12 @@ it.effect("retains unfinished background work when adopting an already completed
 function captureRootRunTermination(input: {
   readonly key: string;
   readonly adoptExistingTurn?: RunExecutionService.RunExecutionServiceV2StartRootRunInput["adoptExistingTurn"];
+  readonly eventDelivery?: ProviderAdapter.ProviderAdapterV2SessionRuntime["eventDelivery"];
+  readonly acknowledgeEvent?: ProviderAdapter.ProviderAdapterV2EventSubscription["acknowledge"];
+  readonly readProviderReceipt?: EventSink.EventSinkV2["Service"]["readProviderReceipt"];
+  readonly onSinkWrite?: (
+    input: Parameters<EventSink.EventSinkV2["Service"]["write"]>[0],
+  ) => Effect.Effect<void>;
   readonly captureBaseline?: Effect.Effect<void>;
   readonly shouldFinalizeRun: () => Effect.Effect<boolean, ProjectionStore.ProjectionStoreV2Error>;
   readonly rejectTerminalWrite?: boolean;
@@ -3095,8 +3101,12 @@ function captureRootRunTermination(input: {
           }),
           layerTurnItemPositionsTest,
           Layer.mock(EventSink.EventSinkV2)({
+            ...(input.readProviderReceipt === undefined
+              ? {}
+              : { readProviderReceipt: input.readProviderReceipt }),
             write: (payload) =>
               Effect.gen(function* () {
+                yield* input.onSinkWrite?.(payload) ?? Effect.void;
                 for (const event of payload.events) {
                   if (event.type === "turn-item.updated") {
                     yield* captureTurnItem(event.payload);
@@ -3155,7 +3165,11 @@ function captureRootRunTermination(input: {
         providerSessionId: ProviderSessionId.make(`session:${input.key}`),
         session: {
           events: Stream.empty,
+          ...(input.eventDelivery === undefined ? {} : { eventDelivery: input.eventDelivery }),
           subscribeEvents: Effect.succeed({
+            ...(input.acknowledgeEvent === undefined
+              ? {}
+              : { acknowledge: input.acknowledgeEvent }),
             events:
               input.events?.(ids) ??
               Stream.fromIterable([
@@ -3783,4 +3797,76 @@ it.effect("keeps a failed root's still-running native children live while the ru
       "a child that outlives the failed root must not be settled with it",
     );
   }),
+);
+
+it.effect(
+  "acknowledges adopted events after durable completion and skips an already consumed delivery",
+  () =>
+    Effect.gen(function* () {
+      const receipts = new WeakMap<
+        ProviderAdapter.ProviderAdapterV2Event,
+        { incarnation: string; sequence: number }
+      >();
+      const completed = new Set<number>();
+      const order: string[] = [];
+      yield* captureRootRunTermination({
+        key: "handover:consumer-ack",
+        adoptExistingTurn: { lifecycleEvents: [] },
+        captureBaseline: Effect.die("must retain the original baseline"),
+        startTurn: () => Effect.die("must not start another model turn"),
+        shouldFinalizeRun: () => Effect.succeed(true),
+        events: (ids) => {
+          const item = backgroundTurnItemEvent(ids, "command_execution", "completed", 1);
+          const terminal = rootTerminalEvent(ids, "completed");
+          receipts.set(item, { incarnation: "retained-harness", sequence: 1 });
+          receipts.set(terminal, { incarnation: "retained-harness", sequence: 2 });
+          return Stream.make(item, item, terminal);
+        },
+        eventDelivery: {
+          receiptFor: (event) => receipts.get(event),
+          acknowledge: () => Effect.die("only the session manager acknowledges the host"),
+          resume: Effect.void,
+        },
+        readProviderReceipt: (key) =>
+          Effect.sync(() =>
+            completed.has(key.sequence) ? { committed: true, storedEvents: [] } : undefined,
+          ),
+        onSinkWrite: (input) =>
+          Effect.sync(() => {
+            if (
+              input.providerReceipt?.operation === "consumer-complete" &&
+              !completed.has(input.providerReceipt.sequence)
+            ) {
+              completed.add(input.providerReceipt.sequence);
+              order.push(`persist:${input.providerReceipt.sequence}`);
+            }
+          }),
+        acknowledgeEvent: (event) =>
+          Effect.sync(() => {
+            const sequence = receipts.get(event)!.sequence;
+            assert.isTrue(completed.has(sequence));
+            order.push(`ack:${sequence}`);
+          }),
+        ingestNormalized: (input) =>
+          Effect.sync(() => {
+            order.push(`ingest:${receipts.get(input.event)!.sequence}`);
+            return [];
+          }),
+        beforeTerminalWrite: () =>
+          Effect.sync(() => {
+            order.push("finalize");
+            return true;
+          }),
+      });
+      assert.deepEqual(order, [
+        "ingest:1",
+        "persist:1",
+        "ack:1",
+        "ack:1",
+        "ingest:2",
+        "finalize",
+        "persist:2",
+        "ack:2",
+      ]);
+    }),
 );

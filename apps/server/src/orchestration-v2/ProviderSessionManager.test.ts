@@ -16,6 +16,7 @@ import {
   ProviderInstanceId,
   type ProviderSessionId,
   ThreadId,
+  TurnItemId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
@@ -325,6 +326,7 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
   state: Ref.Ref<TestProviderRuntimeState>,
   options: {
     readonly failEventStream?: boolean;
+    readonly eventDelivery?: ProviderAdapter.ProviderAdapterV2SessionRuntime["eventDelivery"];
     readonly capabilities?: OrchestrationV2ProviderCapabilities;
     readonly mcpConfigs?: Ref.Ref<
       ReadonlyArray<McpProviderSession.McpProviderSessionConfig | undefined>
@@ -405,6 +407,7 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
           driver: CODEX_DRIVER,
           providerSessionId: input.providerSessionId,
           providerSession: session,
+          ...(options.eventDelivery === undefined ? {} : { eventDelivery: options.eventDelivery }),
           events: options.failEventStream
             ? Stream.fail(
                 new ProviderAdapter.ProviderAdapterEventStreamError({
@@ -464,6 +467,7 @@ function layerTest(input: {
   readonly idleTimeoutMs: number;
   readonly maxIdlePinMs?: number;
   readonly failEventStream?: boolean;
+  readonly eventDelivery?: ProviderAdapter.ProviderAdapterV2SessionRuntime["eventDelivery"];
   readonly capabilities?: OrchestrationV2ProviderCapabilities;
   readonly mcpConfigs?: Ref.Ref<
     ReadonlyArray<McpProviderSession.McpProviderSessionConfig | undefined>
@@ -504,6 +508,7 @@ function layerTest(input: {
   const layerRegistry = Layer.unwrap(
     makeProviderAdapter(input.state, {
       failEventStream: input.failEventStream ?? false,
+      ...(input.eventDelivery === undefined ? {} : { eventDelivery: input.eventDelivery }),
       ...(input.capabilities === undefined ? {} : { capabilities: input.capabilities }),
       ...(input.mcpConfigs === undefined ? {} : { mcpConfigs: input.mcpConfigs }),
       ...(input.beforeOpen === undefined ? {} : { beforeOpen: input.beforeOpen }),
@@ -3658,4 +3663,137 @@ it.effect("ProviderSessionManagerV2 gives a delegated child its project's device
     });
     assert.isTrue(child?.capabilities?.has("device"));
   }),
+);
+
+it.effect(
+  "acknowledges hosted output only after every consumer finishes and retains abandoned deliveries",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const hostAcks = yield* Queue.unbounded<number>();
+      const receipts = new WeakMap<
+        ProviderAdapter.ProviderAdapterV2Event,
+        { incarnation: string; sequence: number }
+      >();
+      const seenFirst = yield* Deferred.make<void>();
+      const seenSecond = yield* Deferred.make<void>();
+      const allowFirst = yield* Deferred.make<void>();
+      const allowSecond = yield* Deferred.make<void>();
+      const firstAcknowledged = yield* Deferred.make<void>();
+      const abandonedSeen = yield* Deferred.make<void>();
+      yield* Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("hosted-ack-thread");
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        yield* eventSink.write({
+          events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+        });
+        const runtime = yield* manager.open({
+          threadId,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+        const first = yield* runtime.subscribeEvents!;
+        const second = yield* runtime.subscribeEvents!;
+        const consume = (
+          subscription: ProviderAdapter.ProviderAdapterV2EventSubscription,
+          seen: Deferred.Deferred<void>,
+          allowed: Deferred.Deferred<void>,
+        ) =>
+          subscription.events.pipe(
+            Stream.runForEach((event) =>
+              Effect.gen(function* () {
+                yield* Deferred.succeed(seen, undefined);
+                yield* Deferred.await(allowed);
+                yield* subscription.acknowledge!(event);
+                if (subscription === first) yield* Deferred.succeed(firstAcknowledged, undefined);
+              }),
+            ),
+            Effect.exit,
+            Effect.forkChild,
+          );
+        const firstReader = yield* consume(first, seenFirst, allowFirst);
+        const secondReader = yield* consume(second, seenSecond, allowSecond);
+        const source = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId))!;
+        const event: ProviderAdapter.ProviderAdapterV2Event = {
+          type: "provider_session.updated",
+          driver: CODEX_DRIVER,
+          providerSession: runtime.providerSession,
+        };
+        receipts.set(event, { incarnation: "hosted-ack", sequence: 1 });
+        yield* Queue.offer(source, event);
+        yield* Deferred.await(seenFirst);
+        yield* Deferred.await(seenSecond);
+        assert.isTrue(Option.isNone(yield* Queue.poll(hostAcks)));
+        yield* Deferred.succeed(allowFirst, undefined);
+        yield* Deferred.await(firstAcknowledged);
+        assert.isTrue(Option.isNone(yield* Queue.poll(hostAcks)));
+        yield* Deferred.succeed(allowSecond, undefined);
+        assert.equal(yield* Queue.take(hostAcks), 1);
+        const delta: ProviderAdapter.ProviderAdapterV2Event = {
+          type: "command_output.delta",
+          driver: CODEX_DRIVER,
+          threadId,
+          itemId: TurnItemId.make("hosted-command"),
+          chunk: "still running\n",
+        };
+        receipts.set(delta, { incarnation: "hosted-ack", sequence: 2 });
+        yield* Queue.offer(source, delta);
+        assert.equal(yield* Queue.take(hostAcks), 2);
+        assert.isUndefined(
+          yield* eventSink.readProviderReceipt({
+            incarnation: "hosted-ack",
+            sequence: 1,
+            consumer: "session",
+            operation: "status",
+          }),
+        );
+
+        const abandoned = yield* runtime.subscribeEvents!;
+        const abandonedReader = yield* abandoned.events.pipe(
+          Stream.runForEach(() =>
+            Deferred.succeed(abandonedSeen, undefined).pipe(Effect.andThen(Effect.never)),
+          ),
+          Effect.exit,
+          Effect.forkChild,
+        );
+        const next = { ...event };
+        receipts.set(next, { incarnation: "hosted-ack", sequence: 3 });
+        yield* Queue.offer(source, next);
+        yield* Deferred.await(abandonedSeen);
+        yield* abandoned.close;
+        yield* manager.close(providerSessionId);
+        yield* Fiber.interrupt(abandonedReader);
+        yield* Fiber.join(firstReader);
+        yield* Fiber.join(secondReader);
+        assert.isTrue(Option.isNone(yield* Queue.poll(hostAcks)));
+        assert.isDefined(
+          yield* eventSink.readProviderReceipt({
+            incarnation: "hosted-ack",
+            sequence: 3,
+            consumer: "session",
+            operation: "status",
+          }),
+        );
+      }).pipe(
+        Effect.provide(
+          layerTest({
+            state,
+            idleTimeoutMs: 60_000,
+            eventDelivery: {
+              receiptFor: (event) => receipts.get(event),
+              acknowledge: (through) => Queue.offer(hostAcks, through).pipe(Effect.asVoid),
+              resume: Effect.void,
+            },
+          }),
+        ),
+      );
+    }),
 );

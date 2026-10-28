@@ -15,8 +15,10 @@ export function registerDictationTiptap(
   if (draftKey) {
     for (const attach of pendingDraftTargets.get(draftKey) ?? []) attach(editor);
   }
-  return registerDictationEditor(editor.view.dom, () =>
-    captureTiptapTarget(editor, captureDetached?.(), draftKey),
+  return registerDictationEditor(
+    editor.view.dom,
+    () => captureTiptapTarget(editor, captureDetached?.(), draftKey),
+    draftKey ? `draft:${draftKey}` : undefined,
   );
 }
 
@@ -32,6 +34,7 @@ function captureTiptapTarget(
   let currentEditor: Editor | null = editor;
   let form = editor.view.dom.closest("form");
   let disposed = false;
+  let failure: string | null = null;
   const map = ({ transaction }: { transaction: Transaction }) => {
     if (!currentEditor) return;
     bookmark = bookmark.map(transaction.mapping);
@@ -54,18 +57,30 @@ function captureTiptapTarget(
   editor.on("transaction", map);
   return {
     apply(text: string, submit: boolean) {
+      failure = null;
       const editor = currentEditor;
-      if (disposed || !editor || !state) return false;
+      if (disposed || !editor || !state) {
+        failure = "The captured editor state was released before delivery.";
+        return false;
+      }
       if (editor.isDestroyed || !editor.view.dom.isConnected) {
-        if (!detached) return false;
+        if (!detached) {
+          failure = "The original editor unmounted without a saved draft destination.";
+          return false;
+        }
         const selection = bookmark.resolve(state.doc);
-        return detached(
+        const applied = detached(
           state,
           state.apply(state.tr.insertText(text, selection.from, selection.to)),
           submit,
         );
+        if (!applied) failure = "The saved draft changed after its editor unmounted.";
+        return applied;
       }
-      if (!editor.isEditable) return false;
+      if (!editor.isEditable) {
+        failure = "The original editor is now read-only.";
+        return false;
+      }
       const selection = bookmark.resolve(editor.state.doc);
       flushSync(() =>
         editor.view.dispatch(editor.state.tr.insertText(text, selection.from, selection.to)),
@@ -84,6 +99,7 @@ function captureTiptapTarget(
       }
       return true;
     },
+    failureReason: () => failure,
     dispose() {
       if (disposed) return;
       disposed = true;

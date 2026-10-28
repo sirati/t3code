@@ -5,16 +5,13 @@ import * as Schedule from "effect/Schedule";
 import * as Option from "effect/Option";
 import * as DesktopAssets from "./DesktopAssets.ts";
 import { makeComponentLogger } from "./DesktopObservability.ts";
-import {
-  DictationSessionTargets,
-  DICTATION_SESSION_TIMEOUT_ERROR,
-} from "@t3tools/shared/dictationSessionTargets";
+import { DesktopDictationRoutes } from "./DesktopDictationRoutes.ts";
 import { app, BrowserWindow, ipcMain, nativeImage, type WebContents } from "electron";
 
 const eventChannel = "dictation:event";
 const responseChannel = "dictation:respond";
 const acknowledgementChannel = "dictation:acknowledge";
-
+const moveChannel = "dictation:move";
 const { logError } = makeComponentLogger("desktop-dictation");
 
 function connectDictation(
@@ -25,24 +22,18 @@ function connectDictation(
   let client: Client | null = null;
   let lease: number | null = null;
   let lastWindow: BrowserWindow | null = BrowserWindow.getFocusedWindow();
-  const targets = new DictationSessionTargets<WebContents>(
-    () => {},
-    (session, target) => {
-      reportError(session, DICTATION_SESSION_TIMEOUT_ERROR);
-      if (!target.isDestroyed()) target.send(eventChannel, { kind: "timeout", session });
-      void client?.acknowledge(session, false, DICTATION_SESSION_TIMEOUT_ERROR).catch(() => {});
-    },
-  );
   const listeners = new Map<number, { target: WebContents; destroyed: () => void }>();
+  const routes = new DesktopDictationRoutes((id, event) => {
+    const target = listeners.get(id)?.target;
+    if (target && !target.isDestroyed()) target.send(eventChannel, event);
+  }, reportError);
   const removeListener = (id: number) => {
     const listener = listeners.get(id);
     if (!listener) return;
     listeners.delete(id);
     listener.target.off("destroyed", listener.destroyed);
+    routes.unlisten(id);
     if (lastWindow?.isDestroyed() || lastWindow?.webContents.id === id) lastWindow = null;
-    for (const [session, target] of targets) {
-      if (target.id === id) targets.delete(session);
-    }
   };
   const activate = (_event: unknown, window: BrowserWindow) => {
     lastWindow = window;
@@ -72,29 +63,29 @@ function connectDictation(
       listeners.set(id, { target: event.sender, destroyed });
       event.sender.once("destroyed", destroyed);
     }
+    routes.listen(event.sender.id);
     const window = BrowserWindow.fromWebContents(event.sender);
     if (window?.isFocused()) activate(null, window);
   };
-  const unlisten = (event: Electron.IpcMainEvent) => {
-    removeListener(event.sender.id);
-  };
+  const unlisten = (event: Electron.IpcMainEvent) => removeListener(event.sender.id);
   ipcMain.on("dictation:listen", listen);
   ipcMain.on("dictation:unlisten", unlisten);
   ipcMain.handle(responseChannel, async (event, session: unknown, accept: unknown) => {
-    if (
-      typeof session !== "string" ||
-      typeof accept !== "boolean" ||
-      targets.get(session)?.id !== event.sender.id
-    )
+    if (typeof session !== "string" || typeof accept !== "boolean")
       throw new Error("Invalid dictation offer response");
+    const audio = routes.offered(session, event.sender.id);
     try {
-      await client?.respond(session, accept);
+      await client?.respond(session, accept, accept ? audio : { level: false, spectrum: false });
+      routes.accept(session, event.sender.id, accept);
     } catch (error) {
-      targets.delete(session);
+      routes.end(session);
       throw error;
-    } finally {
-      if (!accept) targets.delete(session);
     }
+  });
+  ipcMain.handle(moveChannel, (event, session: unknown) => {
+    if (typeof session !== "string" || !listeners.has(event.sender.id))
+      throw new Error("Invalid dictation destination");
+    return routes.move(session, event.sender.id);
   });
   ipcMain.handle(
     acknowledgementChannel,
@@ -102,11 +93,10 @@ function connectDictation(
       if (
         typeof session !== "string" ||
         typeof applied !== "boolean" ||
-        !(error === null || typeof error === "string") ||
-        targets.get(session)?.id !== event.sender.id
+        !(error === null || typeof error === "string")
       )
         throw new Error("Invalid dictation acknowledgement");
-      targets.delete(session);
+      routes.acknowledge(session, event.sender.id, applied);
       if (!applied) reportError(session, error ?? "Dictation could not be delivered.");
       await client?.acknowledge(session, applied, error);
     },
@@ -136,34 +126,29 @@ function connectDictation(
             await client.respond(event.session, false);
             continue;
           }
-          targets.set(event.session, window.webContents);
-          window.webContents.send(eventChannel, { kind: "offer", session: event.session });
+          routes.offer(event.session, window.webContents.id, event.provider, event.audio);
+        } else if (event.kind === "audio") {
+          routes.audio(event.session, event.frame);
         } else if (event.kind === "transcript") {
-          const target = targets.get(event.session);
-          if (!target || target.isDestroyed()) {
-            await client.acknowledge(event.session, false, "The original window closed.");
-            targets.delete(event.session);
-            continue;
+          if (!routes.deliver(event.session, event.transcript.text, event.transcript.submit)) {
+            routes.end(event.session);
+            await client.acknowledge(
+              event.session,
+              false,
+              "The destination window closed before delivery.",
+            );
           }
-          target.send(eventChannel, {
-            kind: "transcript",
-            session: event.session,
-            ...event.transcript,
-          });
         } else if (event.kind === "cancelled") {
-          const target = targets.get(event.session);
           const timedOut =
             event.reason === "session timed out" || event.reason === "offer timed out";
-          const error = `Dictation failed because the broker reported: ${event.reason}. The original input has been released.`;
-          if (timedOut && target) reportError(event.session, error);
-          if (target && !target.isDestroyed())
-            target.send(
-              eventChannel,
-              timedOut
-                ? { kind: "timeout", session: event.session, error }
-                : { kind: "cancelled", session: event.session },
-            );
-          targets.delete(event.session);
+          routes.end(
+            event.session,
+            timedOut
+              ? "Dictation failed because the broker reported: " +
+                  event.reason +
+                  ". The original input has been released."
+              : undefined,
+          );
         }
       }
     } catch {
@@ -172,9 +157,7 @@ function connectDictation(
       client?.close();
       client = null;
       lease = null;
-      for (const [session, target] of targets)
-        if (!target.isDestroyed()) target.send(eventChannel, { kind: "cancelled", session });
-      targets.clear();
+      routes.clear();
     }
   };
   return {
@@ -187,9 +170,10 @@ function connectDictation(
       app.off("browser-window-blur", deactivate);
       ipcMain.removeHandler(responseChannel);
       ipcMain.removeHandler(acknowledgementChannel);
+      ipcMain.removeHandler(moveChannel);
       ipcMain.off("dictation:listen", listen);
       ipcMain.off("dictation:unlisten", unlisten);
-      targets.clear();
+      routes.clear();
       for (const id of listeners.keys()) removeListener(id);
     },
   };

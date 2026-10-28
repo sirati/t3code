@@ -84,8 +84,73 @@ contextBridge.exposeInMainWorld("desktopBridge", {
           typeof value.session !== "string"
         )
           return;
-        if (value.kind === "offer" || value.kind === "cancelled")
-          listener({ kind: value.kind, session: value.session });
+        if (value.kind === "offer")
+          listener({
+            kind: "offer",
+            session: value.session,
+            ...("provider" in value && typeof value.provider === "string"
+              ? { provider: value.provider }
+              : {}),
+            ...("audio" in value &&
+            typeof value.audio === "object" &&
+            value.audio !== null &&
+            "level" in value.audio &&
+            "spectrum" in value.audio &&
+            typeof value.audio.level === "boolean" &&
+            typeof value.audio.spectrum === "boolean"
+              ? { audio: { level: value.audio.level, spectrum: value.audio.spectrum } }
+              : {}),
+          });
+        else if (value.kind === "cancelled")
+          listener({ kind: "cancelled", session: value.session });
+        else if (
+          value.kind === "active" &&
+          "revision" in value &&
+          typeof value.revision === "number" &&
+          Number.isSafeInteger(value.revision) &&
+          value.revision >= 0 &&
+          "provider" in value &&
+          typeof value.provider === "string" &&
+          "owned" in value &&
+          typeof value.owned === "boolean" &&
+          "canMove" in value &&
+          typeof value.canMove === "boolean" &&
+          "audio" in value &&
+          typeof value.audio === "object" &&
+          value.audio !== null &&
+          "level" in value.audio &&
+          "spectrum" in value.audio &&
+          typeof value.audio.level === "boolean" &&
+          typeof value.audio.spectrum === "boolean"
+        )
+          listener({
+            kind: "active",
+            session: value.session,
+            provider: value.provider,
+            owned: value.owned,
+            canMove: value.canMove,
+            revision: value.revision,
+            audio: { level: value.audio.level, spectrum: value.audio.spectrum },
+          });
+        else if (
+          value.kind === "audio" &&
+          "level" in value &&
+          (value.level === null ||
+            (typeof value.level === "number" && Number.isFinite(value.level))) &&
+          "spectrum" in value &&
+          (value.spectrum === null ||
+            (Array.isArray(value.spectrum) &&
+              value.spectrum.length <= 64 &&
+              value.spectrum.every(
+                (band: unknown) => typeof band === "number" && Number.isFinite(band),
+              )))
+        )
+          listener({
+            kind: "audio",
+            session: value.session,
+            level: value.level,
+            spectrum: value.spectrum,
+          });
         else if (value.kind === "timeout")
           listener({
             kind: "timeout",
@@ -114,6 +179,7 @@ contextBridge.exposeInMainWorld("desktopBridge", {
       };
     },
     respond: (session, accept) => ipcRenderer.invoke("dictation:respond", session, accept),
+    move: (session) => ipcRenderer.invoke("dictation:move", session),
     acknowledge: (session, applied, error) =>
       ipcRenderer.invoke("dictation:acknowledge", session, applied, error),
   },

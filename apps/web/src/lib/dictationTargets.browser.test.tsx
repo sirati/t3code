@@ -1,3 +1,5 @@
+import { DictationIndicators } from "../components/DictationIndicators";
+import { dictationState } from "./dictationState";
 import { Editor } from "@tiptap/core";
 import StarterKit from "@tiptap/starter-kit";
 import { expect, it, vi } from "vite-plus/test";
@@ -11,6 +13,16 @@ import {
   startDictationTargets,
 } from "./dictationTargets";
 import { registerDictationTiptap } from "./dictationTiptap";
+
+function pendingMove() {
+  let resolve!: (revision: number) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<number>((done, fail) => {
+    resolve = done;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+}
 
 function installDictationBridge(rejectOffer = false) {
   type Listener = Parameters<NonNullable<DesktopBridge["dictation"]>["onEvent"]>[0];
@@ -30,6 +42,7 @@ function installDictationBridge(rejectOffer = false) {
         respond: async () => {
           if (rejectOffer) throw new Error("Disconnected");
         },
+        move: async () => 1,
         acknowledge,
       },
     },
@@ -238,3 +251,244 @@ it.each(["completion", "cancellation", "rejection", "teardown"] as const)(
     expect(target.apply).toHaveBeenCalledTimes(ending === "completion" ? 1 : 0);
   },
 );
+
+it("shows live bars in the saved field and moves the selection and submission only after a click", async () => {
+  const submit = vi.fn((event: React.FormEvent) => event.preventDefault());
+  // router: false because this test drives dictation through isolated fields.
+  await using screen = await render(
+    <>
+      <input aria-label="first" defaultValue="original" />
+      <form onSubmit={submit}>
+        <input aria-label="second" defaultValue="hello world" />
+      </form>
+      <DictationIndicators />
+    </>,
+    { router: false },
+  );
+  using bridge = installDictationBridge();
+  const stop = startDictationTargets();
+  using _cleanup = { [Symbol.dispose]: stop };
+  const first = screen.getByRole("textbox", { name: "first" }).element() as HTMLInputElement;
+  const second = screen.getByRole("textbox", { name: "second" }).element() as HTMLInputElement;
+  const originalPadding = second.style.paddingInlineEnd;
+  first.focus();
+  await bridge.deliver({
+    kind: "offer",
+    session: "ui",
+    provider: "Speech",
+    audio: { level: true, spectrum: true },
+  });
+  await bridge.deliver({
+    kind: "active",
+    session: "ui",
+    provider: "Speech",
+    owned: true,
+    canMove: true,
+    revision: 0,
+    audio: { level: true, spectrum: true },
+  });
+  const originalBars = page.getByRole("img", { name: "Receiving dictation: first", exact: true });
+  await expect.element(originalBars).toBeVisible();
+  await bridge.deliver({
+    kind: "audio",
+    session: "ui",
+    level: 0.8,
+    spectrum: [0.2, 0.4, 0.6, 0.8, 1],
+  });
+  await vi.waitFor(() =>
+    expect(originalBars.element().querySelectorAll("rect")[4]?.getAttribute("height")).toBe("18"),
+  );
+  second.focus();
+  second.setSelectionRange(6, 11);
+  await expect.element(originalBars).toBeVisible();
+  await page.getByRole("button", { name: "Move dictation here: second", exact: true }).click();
+  await expect
+    .element(page.getByRole("img", { name: "Receiving dictation: second", exact: true }))
+    .toBeVisible();
+  await expect
+    .element(page.getByRole("button", { name: "Move dictation here: first", exact: true }))
+    .toBeVisible();
+  first.focus();
+  await bridge.deliver({ kind: "transcript", session: "ui", text: "speech", submit: true });
+  expect(first.value).toBe("original");
+  expect(second.value).toBe("hello speech");
+  expect(document.activeElement).toBe(first);
+  expect(submit).toHaveBeenCalledOnce();
+  expect(bridge.acknowledge).toHaveBeenCalledWith("ui", true, null);
+  await expect
+    .element(page.getByRole("button", { name: "Move dictation here: first", exact: true }))
+    .not.toBeInTheDocument();
+  await vi.waitFor(() => expect(second.style.paddingInlineEnd).toBe(originalPadding));
+});
+
+it.each(["rejected", "superseded", "cancelled", "finishing"] as const)(
+  "releases pending move targets when %s",
+  async (outcome) => {
+    // router: false because this test drives IPC ownership races directly.
+    await using screen = await render(
+      <>
+        <input aria-label="first" />
+        <input aria-label="second" />
+      </>,
+      { router: false },
+    );
+    using bridge = installDictationBridge();
+    using _errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const first = screen.getByRole("textbox", { name: "first" }).element() as HTMLInputElement;
+    const second = screen.getByRole("textbox", { name: "second" }).element() as HTMLInputElement;
+    const original = { apply: vi.fn(() => true), dispose: vi.fn() };
+    const candidate = { apply: vi.fn(() => true), dispose: vi.fn() };
+    const unregisterFirst = registerDictationEditor(first, () => original);
+    const unregisterSecond = registerDictationEditor(second, () => candidate);
+    const stop = startDictationTargets();
+    using _cleanup = {
+      [Symbol.dispose]() {
+        stop();
+        unregisterFirst();
+        unregisterSecond();
+      },
+    };
+    first.focus();
+    await bridge.deliver({ kind: "offer", session: "race" });
+    const active = {
+      kind: "active" as const,
+      session: "race",
+      provider: "Speech",
+      owned: true,
+      canMove: true,
+      revision: 0,
+      audio: { level: true, spectrum: false },
+    };
+    await bridge.deliver(active);
+    const pending = pendingMove();
+    using _move = vi
+      .spyOn(window.desktopBridge!.dictation!, "move")
+      .mockReturnValue(pending.promise);
+    const moved = dictationState.getState().move!("race", second);
+    if (outcome === "rejected") pending.reject(new Error("Already finished"));
+    else {
+      if (outcome === "superseded") await bridge.deliver({ ...active, owned: false, revision: 2 });
+      if (outcome === "cancelled") await bridge.deliver({ kind: "cancelled", session: "race" });
+      if (outcome === "finishing") await bridge.deliver({ ...active, canMove: false });
+      pending.resolve(1);
+    }
+    expect(await moved).toBe(false);
+    if (outcome === "rejected" || outcome === "finishing") {
+      expect(original.dispose).not.toHaveBeenCalled();
+      await bridge.deliver({ kind: "transcript", session: "race", text: "speech", submit: false });
+      expect(original.apply).toHaveBeenCalledOnce();
+    }
+    expect(candidate.apply).not.toHaveBeenCalled();
+    expect(original.dispose).toHaveBeenCalledOnce();
+    expect(candidate.dispose).toHaveBeenCalledOnce();
+  },
+);
+
+it("does not extend the session lifetime when voice updates arrive or the destination moves", async () => {
+  // router: false because this test checks resource deadlines without navigation.
+  await using screen = await render(
+    <>
+      <input aria-label="first" />
+      <input aria-label="second" />
+    </>,
+    { router: false },
+  );
+  using _timers = fakeTimers();
+  using errors = vi.spyOn(console, "error").mockImplementation(() => {});
+  using bridge = installDictationBridge();
+  const first = screen.getByRole("textbox", { name: "first" }).element() as HTMLInputElement;
+  const second = screen.getByRole("textbox", { name: "second" }).element() as HTMLInputElement;
+  const original = { apply: vi.fn(() => true), dispose: vi.fn() };
+  const candidate = { apply: vi.fn(() => true), dispose: vi.fn() };
+  const unregisterFirst = registerDictationEditor(first, () => original);
+  const unregisterSecond = registerDictationEditor(second, () => candidate);
+  const stop = startDictationTargets();
+  using _cleanup = {
+    [Symbol.dispose]() {
+      stop();
+      unregisterFirst();
+      unregisterSecond();
+    },
+  };
+  first.focus();
+  await bridge.deliver({ kind: "offer", session: "deadline" });
+  await bridge.deliver({
+    kind: "active",
+    session: "deadline",
+    provider: "Speech",
+    owned: true,
+    canMove: true,
+    revision: 0,
+    audio: { level: true, spectrum: false },
+  });
+  await vi.advanceTimersByTimeAsync(29 * 60 * 1000);
+  await bridge.deliver({ kind: "audio", session: "deadline", level: 1, spectrum: null });
+  expect(await dictationState.getState().move!("deadline", second)).toBe(true);
+  expect(original.dispose).toHaveBeenCalledOnce();
+  expect(candidate.dispose).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(60 * 1000);
+  expect(candidate.dispose).toHaveBeenCalledOnce();
+  expect(dictationState.getState().sessions).toEqual([]);
+  expect(errors).toHaveBeenCalledOnce();
+  expect(bridge.acknowledge).toHaveBeenCalledWith(
+    "deadline",
+    false,
+    expect.stringContaining("30 minutes"),
+  );
+});
+
+it("inserts into a transferred destination even if delivery arrives before its move receipt", async () => {
+  // router: false because this test checks ordered main-process events and late IPC receipts.
+  await using screen = await render(
+    <>
+      <input aria-label="first" />
+      <input aria-label="second" />
+    </>,
+    { router: false },
+  );
+  using bridge = installDictationBridge();
+  const first = screen.getByRole("textbox", { name: "first" }).element() as HTMLInputElement;
+  const second = screen.getByRole("textbox", { name: "second" }).element() as HTMLInputElement;
+  const original = { apply: vi.fn(() => true), dispose: vi.fn() };
+  const candidate = { apply: vi.fn(() => true), dispose: vi.fn() };
+  const unregisterFirst = registerDictationEditor(first, () => original);
+  const unregisterSecond = registerDictationEditor(second, () => candidate);
+  const stop = startDictationTargets();
+  using _cleanup = {
+    [Symbol.dispose]() {
+      stop();
+      unregisterFirst();
+      unregisterSecond();
+    },
+  };
+  first.focus();
+  await bridge.deliver({ kind: "offer", session: "fast-delivery" });
+  const active = {
+    kind: "active" as const,
+    session: "fast-delivery",
+    provider: "Speech",
+    owned: true,
+    canMove: true,
+    revision: 0,
+    audio: { level: false, spectrum: false },
+  };
+  await bridge.deliver(active);
+  const pending = pendingMove();
+  using _move = vi.spyOn(window.desktopBridge!.dictation!, "move").mockReturnValue(pending.promise);
+  const moved = dictationState.getState().move!("fast-delivery", second);
+  await bridge.deliver({ ...active, revision: 1 });
+  await bridge.deliver({ ...active, revision: 1, canMove: false });
+  await bridge.deliver({
+    kind: "transcript",
+    session: "fast-delivery",
+    text: "speech",
+    submit: true,
+  });
+  pending.resolve(1);
+  await moved;
+  expect(original.apply).not.toHaveBeenCalled();
+  expect(candidate.apply).toHaveBeenCalledWith("speech", true);
+  expect(original.dispose).toHaveBeenCalledOnce();
+  expect(candidate.dispose).toHaveBeenCalledOnce();
+  expect(dictationState.getState().sessions).toEqual([]);
+});

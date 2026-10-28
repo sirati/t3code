@@ -9,6 +9,7 @@ import { isElectron } from "./env";
 import { startAppServices } from "./appInit";
 import { AppRoot } from "./AppRoot";
 import { startDictationTargets } from "./lib/dictationTargets";
+import { DictationIndicators } from "./components/DictationIndicators";
 import { clearChunkReloadGuard, reloadOnceForChunkLoadError } from "./lib/chunkReloadGuard";
 
 const router = startAppServices();
@@ -27,7 +28,12 @@ window.addEventListener("vite:preloadError", (event) => {
   }
 });
 
-const app = <AppRoot router={router} />;
+const app = (
+  <>
+    <AppRoot router={router} />
+    <DictationIndicators />
+  </>
+);
 
 // Split by runtime to keep Clerk out of local startup and clerk-js out of browser builds.
 const managedAuthShellModule =

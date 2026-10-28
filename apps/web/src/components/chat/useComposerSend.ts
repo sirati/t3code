@@ -139,6 +139,42 @@ import type { useQueuedRunEdit } from "./useQueuedRunEdit";
 import type { useTimelineFollow } from "./useTimelineFollow";
 import type { useUsageLimitsPanel } from "./useUsageLimitsPanel";
 import type { useWorktreeSetup } from "./useWorktreeSetup";
+import type { ChatComposerHandle } from "./ChatComposer";
+import { getComposerSubmissionValidationMessage } from "./composerSubmission";
+
+type CapturedDictationSubmission = {
+  prompt: string;
+  context: ReturnType<ChatComposerHandle["getSendContext"]>;
+  hasPendingAttachments: boolean;
+};
+
+function dictationSubmissionRefs(
+  captured: CapturedDictationSubmission,
+  reportError: (error: string) => void,
+) {
+  return {
+    promptRef: { current: captured.prompt },
+    composerImagesRef: { current: captured.context.images },
+    composerFilesRef: { current: captured.context.files },
+    composerTerminalContextsRef: { current: captured.context.terminalContexts },
+    composerRef: {
+      current: {
+        getSendContext: () => captured.context,
+        resetCursorState: () => {},
+        hasPendingAttachments: () => captured.hasPendingAttachments,
+        validateProviderInput: (providerInput: string) => {
+          const error = getComposerSubmissionValidationMessage({
+            prompt: captured.prompt,
+            providerInput,
+            submissionTarget: "provider-turn",
+          });
+          if (error) reportError(error);
+          return error === null;
+        },
+      },
+    },
+  };
+}
 
 const ENVIRONMENT_UNAVAILABLE_SEND_TOAST_TRAIL_SIZE = 3;
 
@@ -278,10 +314,10 @@ export function useComposerSend(input: ComposerSendInput) {
     providerInstanceEntries,
     composerRef,
     composerDraftTarget,
-    promptRef,
-    composerImagesRef,
-    composerFilesRef,
-    composerTerminalContextsRef,
+    promptRef: livePromptRef,
+    composerImagesRef: liveComposerImagesRef,
+    composerFilesRef: liveComposerFilesRef,
+    composerTerminalContextsRef: liveComposerTerminalContextsRef,
     feedbackUploadsInFlightRef,
     queuedRunEdit,
     isRevertingCheckpoint,
@@ -355,7 +391,7 @@ export function useComposerSend(input: ComposerSendInput) {
     draftId,
     composerDraftTarget,
     composerRef,
-    promptRef,
+    promptRef: livePromptRef,
     runtimeMode,
     startFromOrigin,
     resetLocalDispatch,
@@ -391,6 +427,8 @@ export function useComposerSend(input: ComposerSendInput) {
     respondingRequestIdsRef.current = respondingRequestIds;
   }, [pendingApprovals, respondingRequestIds]);
 
+  const composerRefAtRender = composerRef;
+  /* oxlint-disable react/immutability -- These are mutable ref handles written by a send event, including isolated refs for a captured dictation. */
   const onSend = async (
     e?: { preventDefault: () => void },
     dispatchMode: ComposerDispatchMode = "auto",
@@ -399,7 +437,20 @@ export function useComposerSend(input: ComposerSendInput) {
       annotation: PreviewAnnotationPayload;
       image: ComposerImageAttachment | null;
     },
+    captured?: CapturedDictationSubmission,
   ) => {
+    // A dictation can outlive this route. Its send must never read the new route's composer refs.
+    const detachedRefs = captured
+      ? dictationSubmissionRefs(captured, (error) => {
+          if (activeThread) setThreadError(activeThread.id, error);
+        })
+      : undefined;
+    const promptRef = detachedRefs?.promptRef ?? livePromptRef;
+    const composerRef = detachedRefs?.composerRef ?? composerRefAtRender;
+    const composerImagesRef = detachedRefs?.composerImagesRef ?? liveComposerImagesRef;
+    const composerFilesRef = detachedRefs?.composerFilesRef ?? liveComposerFilesRef;
+    const composerTerminalContextsRef =
+      detachedRefs?.composerTerminalContextsRef ?? liveComposerTerminalContextsRef;
     e?.preventDefault();
     // What the user pressed send on; uploads below can take a while, and a redirect must not
     // decline approvals for a draft that changed meanwhile.
@@ -696,6 +747,7 @@ export function useComposerSend(input: ComposerSendInput) {
           environmentContexts: composerEnvironmentContexts,
         }),
         interactionMode: followUp.interactionMode,
+        ...(captured ? { capturedSendContext: captured.context } : {}),
       });
       if (!followUpSent) {
         promptRef.current = followUpPromptSnapshot;
@@ -921,6 +973,7 @@ export function useComposerSend(input: ComposerSendInput) {
 
     if (
       multipleModelSelections === null &&
+      currentRouteThreadKeyRef.current === routeThreadKey &&
       shouldDockDraftHeroForSubmission({ isDraftHeroState, activeThreadKey, submissionIntent }) &&
       activeThreadKey
     ) {
@@ -1087,7 +1140,7 @@ export function useComposerSend(input: ComposerSendInput) {
     }
     if (sendQueuesBehindSetup) {
       setSetupQueueSendThreadKey(activeThreadKey);
-    } else {
+    } else if (currentRouteThreadKeyRef.current === routeThreadKey) {
       beginLocalDispatch({
         preparingWorktree: multipleModelSelections !== null || Boolean(baseBranchForWorktree),
         submissionIntent:
@@ -1334,7 +1387,7 @@ export function useComposerSend(input: ComposerSendInput) {
         if (turnUsesAttachmentUploads) {
           releaseDraftAttachments(composerAttachmentsSnapshot);
         }
-        acknowledgeActiveThreadWoke();
+        if (currentRouteThreadKeyRef.current === routeThreadKey) acknowledgeActiveThreadWoke();
         // A draft still on screen finalizes once its thread route takes over.
         if (sentDraftThreadRef) {
           if (backgroundDraftOpened || currentRouteThreadKeyRef.current !== routeThreadKey) {
@@ -1441,9 +1494,40 @@ export function useComposerSend(input: ComposerSendInput) {
       setDockedDraftHeroThreadKey((currentThreadKey) =>
         currentThreadKey === activeThreadKey ? null : currentThreadKey,
       );
-      if (!sendQueuesBehindSetup) resetLocalDispatch();
+      if (!sendQueuesBehindSetup && currentRouteThreadKeyRef.current === routeThreadKey)
+        resetLocalDispatch();
     }
   };
+  /* oxlint-enable react/immutability */
 
-  return { onSend };
+  const captureDictationSubmission = () => {
+    const handle = composerRef.current;
+    if (!handle) return undefined;
+    const context = handle.getSendContext();
+    const hasPendingAttachments = handle.hasPendingAttachments();
+    return (prompt: string) => {
+      const draft = useComposerDraftStore.getState().getComposerDraft(composerDraftTarget);
+      void onSend(undefined, "auto", "foreground", undefined, {
+        prompt,
+        context: {
+          ...context,
+          ...(draft
+            ? {
+                images: draft.images,
+                files: draft.files,
+                terminalContexts: draft.terminalContexts,
+                previewAnnotations: draft.previewAnnotations,
+                reviewComments: draft.reviewComments,
+                threadContexts: draft.threadContexts,
+                environmentContexts: draft.environmentContexts,
+              }
+            : {}),
+          prompt,
+        },
+        hasPendingAttachments,
+      });
+    };
+  };
+
+  return { onSend, captureDictationSubmission };
 }

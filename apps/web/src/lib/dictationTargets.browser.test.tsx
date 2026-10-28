@@ -81,3 +81,28 @@ it("maps the remembered rich-text selection through edits and inserts transcript
     if (!editor.isDestroyed) editor.destroy();
   }
 });
+
+it("reattaches a pending selection to its own remounted draft and maps subsequent edits", async () => {
+  // router: false because this test exercises editor lifetime rather than application navigation.
+  await using screen = await render(<div data-testid="editor" />, { router: false });
+  const element = screen.getByTestId("editor").element() as HTMLElement;
+  const original = new Editor({ element, extensions: [StarterKit], content: "<p>hello world</p>" });
+  const unregister = registerDictationTiptap(original, undefined, "remounted-draft");
+  original.commands.setTextSelection({ from: 7, to: 12 });
+  original.view.dom.focus();
+  const target = captureDictationTarget(document)!;
+  original.destroy();
+  unregister();
+  const restored = new Editor({ element, extensions: [StarterKit], content: "<p>hello world</p>" });
+  const unregisterRestored = registerDictationTiptap(restored, undefined, "remounted-draft");
+  try {
+    restored.view.dispatch(restored.state.tr.insertText("prefix ", 1));
+    restored.commands.setTextSelection(1);
+    expect(target.apply("speech", false)).toBe(true);
+    expect(restored.getText()).toBe("prefix hello speech");
+  } finally {
+    target.dispose();
+    unregisterRestored();
+    restored.destroy();
+  }
+});

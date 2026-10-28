@@ -1,3 +1,4 @@
+import { captureComposerDictationDraft } from "../../lib/composerDictation";
 import { useComposerTypingGuard } from "./useComposerTypingGuard";
 import { insertAttachmentReferencesForDraft } from "./composerAttachmentReferences";
 import { DESKTOP_PASTE_AS_TEXT_EVENT } from "../../lib/desktopPasteAsText";
@@ -474,6 +475,10 @@ export interface ChatComposerProps {
   onRemoveEditingQueuedAttachment: (attachmentId: string) => void;
 
   onCompactContext: () => void;
+  captureDictationSubmission: () => ((prompt: string) => void) | undefined;
+  capturePendingDictationDraft: () =>
+    | { read(): string; write(value: string, submit: boolean): boolean }
+    | undefined;
   onSend: (
     e?: { preventDefault: () => void },
     dispatchMode?: ComposerDispatchMode,
@@ -3672,7 +3677,19 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 ) : null}
                 <ComposerContextActionsContext value={composerContextActions}>
                   <ComposerPromptEditor
-                    draftKey={composerDraftTargetKey}
+                    draftKey={JSON.stringify([
+                      composerDraftTargetKey,
+                      activePendingProgress ? pendingUserInputs[0]?.requestId : null,
+                      activePendingProgress?.activeQuestion?.id ?? null,
+                    ])}
+                    captureDictationDraft={() =>
+                      activePendingProgress
+                        ? props.capturePendingDictationDraft()
+                        : captureComposerDictationDraft(
+                            composerDraftTarget,
+                            props.captureDictationSubmission(),
+                          )
+                    }
                     // Switching threads lands focus here, so the label names the thread.
                     ariaLabel={activeThread ? `Message ${activeThread.title}` : "Message"}
                     suggestionListId={composerSuggestionListId}

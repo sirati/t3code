@@ -1,22 +1,60 @@
 import type { Editor } from "@tiptap/core";
-import type { Transaction } from "@tiptap/pm/state";
+import type { EditorState, Transaction } from "@tiptap/pm/state";
 import { flushSync } from "react-dom";
 import { registerDictationEditor } from "./dictationTargets";
 
-export function registerDictationTiptap(editor: Editor) {
+const pendingDraftTargets = new Map<string, Set<(editor: Editor) => void>>();
+
+export function registerDictationTiptap(
+  editor: Editor,
+  captureDetached?: () =>
+    | ((before: EditorState, after: EditorState, submit: boolean) => boolean)
+    | undefined,
+  draftKey?: string,
+) {
+  if (draftKey) {
+    for (const attach of pendingDraftTargets.get(draftKey) ?? []) attach(editor);
+  }
   return registerDictationEditor(editor.view.dom, () => {
     if (!editor.isEditable || editor.isDestroyed) return null;
     let bookmark = editor.state.selection.getBookmark();
-    const form = editor.view.dom.closest("form");
+    let state = editor.state;
+    let currentEditor = editor;
+    const detached = captureDetached?.();
+    let form = editor.view.dom.closest("form");
     let disposed = false;
     const map = ({ transaction }: { transaction: Transaction }) => {
       bookmark = bookmark.map(transaction.mapping);
+      state = currentEditor.state;
     };
+    const attach = (next: Editor) => {
+      if (JSON.stringify(state.doc.toJSON()) !== JSON.stringify(next.state.doc.toJSON())) return;
+      currentEditor.off("transaction", map);
+      currentEditor = next;
+      form = next.view.dom.closest("form");
+      state = next.state;
+      next.on("transaction", map);
+    };
+    if (draftKey) {
+      const targets = pendingDraftTargets.get(draftKey) ?? new Set();
+      targets.add(attach);
+      pendingDraftTargets.set(draftKey, targets);
+    }
     editor.on("transaction", map);
     return {
       apply(text, submit) {
-        if (disposed || editor.isDestroyed || !editor.isEditable || !editor.view.dom.isConnected)
-          return false;
+        const editor = currentEditor;
+        if (disposed) return false;
+        if (editor.isDestroyed || !editor.view.dom.isConnected) {
+          if (!detached) return false;
+          const selection = bookmark.resolve(state.doc);
+          return detached(
+            state,
+            state.apply(state.tr.insertText(text, selection.from, selection.to)),
+            submit,
+          );
+        }
+        if (!editor.isEditable) return false;
         const selection = bookmark.resolve(editor.state.doc);
         flushSync(() =>
           editor.view.dispatch(editor.state.tr.insertText(text, selection.from, selection.to)),
@@ -37,7 +75,12 @@ export function registerDictationTiptap(editor: Editor) {
       },
       dispose() {
         disposed = true;
-        editor.off("transaction", map);
+        currentEditor.off("transaction", map);
+        if (draftKey) {
+          const targets = pendingDraftTargets.get(draftKey);
+          targets?.delete(attach);
+          if (targets?.size === 0) pendingDraftTargets.delete(draftKey);
+        }
       },
     };
   });

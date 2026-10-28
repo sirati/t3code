@@ -1,4 +1,8 @@
 import type { ComposerFileAttachment } from "../composerDraftStore";
+import { useComposerDraftStore } from "../composerDraftStore";
+import { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { captureComposerDictationDraft } from "../lib/composerDictation";
 import { formatInlineContextReference } from "../lib/composerContextReferences";
 import { fileContextReference } from "../lib/composerContextRecords";
 import {
@@ -464,7 +468,17 @@ it("dictates into the captured composer selection and submits its original form 
   target.dispose();
 });
 
-it("does not redirect dictation into a different conversation after the original editor unmounts", async () => {
+it("delivers dictation to the original draft after switching conversations and remounting its editor", async () => {
+  const originalRef = scopeThreadRef(
+    EnvironmentId.make("dictation-test"),
+    ThreadId.make("original"),
+  );
+  const otherRef = scopeThreadRef(EnvironmentId.make("dictation-test"), ThreadId.make("other"));
+  const store = useComposerDraftStore.getState();
+  store.setPrompt(originalRef, "original draft");
+  store.setPrompt(otherRef, "different draft");
+  const submitted = vi.fn();
+  const captureDictationDraft = () => captureComposerDictationDraft(originalRef, submitted);
   const props = {
     contextRecords: new Map(),
     skills: [],
@@ -478,11 +492,13 @@ it("does not redirect dictation into a different conversation after the original
     <ComposerPromptEditor
       {...props}
       draftKey="original-thread"
+      captureDictationDraft={captureDictationDraft}
       value="original draft"
       cursor={8}
     />,
   );
   const original = editorIn(screen.container);
+  original.commands.setTextSelection({ from: 10, to: 15 });
   original.view.dom.focus();
   const target = captureDictationTarget(document)!;
   await screen.rerender(
@@ -493,7 +509,10 @@ it("does not redirect dictation into a different conversation after the original
       cursor={0}
     />,
   );
-  expect(target.apply("late transcript", true)).toBe(false);
+  expect(target.apply("late transcript", true)).toBe(true);
+  expect(store.getComposerDraft(originalRef)?.prompt).toBe("original late transcript");
+  expect(store.getComposerDraft(otherRef)?.prompt).toBe("different draft");
+  expect(submitted).toHaveBeenCalledExactlyOnceWith("original late transcript");
   expect(editorIn(screen.container).getText()).toBe("different draft");
   expect(props.onChange).not.toHaveBeenCalledWith(
     expect.stringContaining("late transcript"),
@@ -503,4 +522,13 @@ it("does not redirect dictation into a different conversation after the original
     expect.anything(),
   );
   target.dispose();
+  await screen.rerender(
+    <ComposerPromptEditor
+      {...props}
+      draftKey="original-thread"
+      value={store.getComposerDraft(originalRef)!.prompt}
+      cursor={0}
+    />,
+  );
+  expect(editorIn(screen.container).getText()).toBe("original late transcript");
 });

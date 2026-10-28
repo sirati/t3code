@@ -367,16 +367,23 @@ layer("ProviderEventIngestorV2", (it) => {
       };
 
       yield* eventSink.write({ events: [threadEvent] });
-      const storedEvents = yield* ingestor.ingestNormalized({
+      const initialInput = {
         providerSessionId,
         providerInstanceId: modelSelection.instanceId,
         threadId: threadEvent.threadId,
+        providerReceipt: {
+          incarnation: "host-incarnation-a",
+          sequence: 1,
+          consumer: "session",
+          operation: "event",
+        },
         event: {
-          type: "provider_thread.updated",
+          type: "provider_thread.updated" as const,
           driver: CODEX_DRIVER,
           providerThread,
         },
-      });
+      };
+      const storedEvents = yield* ingestor.ingestNormalized(initialInput);
 
       const projection = yield* projectionStore.getThreadProjection(threadEvent.threadId);
       const storedDomainEvents = yield* eventStore.read({}).pipe(Stream.runCollect);
@@ -406,6 +413,66 @@ layer("ProviderEventIngestorV2", (it) => {
         ["provider-thread.updated"],
       );
       assert.equal(latestThreadSequence, 2);
+
+      const nextInput = {
+        ...initialInput,
+        providerReceipt: { ...initialInput.providerReceipt, sequence: 2 },
+        event: {
+          ...initialInput.event,
+          providerThread: { ...providerThread, status: "active" as const },
+        },
+      };
+      const concurrent = yield* Effect.all(
+        [ingestor.ingestNormalized(nextInput), ingestor.ingestNormalized(nextInput)],
+        { concurrency: 2 },
+      );
+      assert.deepEqual(concurrent[0], concurrent[1]);
+      assert.equal(yield* eventStore.latestSequence(), 3);
+      assert.deepEqual(yield* ingestor.ingestNormalized(initialInput), storedEvents);
+      const afterReplay = yield* projectionStore.getThreadProjection(threadEvent.threadId);
+      assert.equal(afterReplay.providerThreads[0]?.status, "active");
+      assert.equal(yield* eventStore.latestSequence(), 3);
+
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`CREATE TEMP TRIGGER receipt_failure BEFORE INSERT ON orchestration_v2_provider_event_receipts
+        WHEN NEW.operation = 'fault' BEGIN SELECT RAISE(ABORT, 'fixture receipt failure'); END`;
+      const faultInput = {
+        ...initialInput,
+        providerReceipt: { ...initialInput.providerReceipt, sequence: 3, operation: "fault" },
+      };
+      assert.equal(
+        (yield* ingestor.ingestNormalized(faultInput).pipe(Effect.result))._tag,
+        "Failure",
+      );
+      assert.isUndefined(yield* eventSink.readProviderReceipt(faultInput.providerReceipt));
+      assert.equal(yield* eventStore.latestSequence(), 3);
+      assert.equal(
+        (yield* projectionStore.getThreadProjection(threadEvent.threadId)).providerThreads[0]
+          ?.status,
+        "active",
+      );
+      yield* sql`DROP TRIGGER receipt_failure`;
+      yield* ingestor.ingestNormalized(faultInput);
+      assert.equal(yield* eventStore.latestSequence(), 4);
+
+      assert.isUndefined(
+        yield* eventSink.readProviderReceipt({
+          ...initialInput.providerReceipt,
+          consumer: "another-run",
+        }),
+      );
+      assert.isUndefined(
+        yield* eventSink.readProviderReceipt({
+          ...initialInput.providerReceipt,
+          incarnation: "replacement-native-session",
+        }),
+      );
+      yield* eventSink.pruneProviderReceipts({
+        incarnation: initialInput.providerReceipt.incarnation,
+        through: 1,
+      });
+      assert.isUndefined(yield* eventSink.readProviderReceipt(initialInput.providerReceipt));
+      assert.isDefined(yield* eventSink.readProviderReceipt(nextInput.providerReceipt));
     }),
   );
 
@@ -2192,34 +2259,48 @@ const ingestCompletedProviderTurn = (
     const threadEvent = yield* threadCreatedEvent(now);
     yield* eventSink.write({ events: [threadEvent] });
     const providerTurnId = ProviderTurnId.make("provider-turn:locked");
-    const exit = yield* ingestor
-      .ingestNormalized({
-        providerSessionId: yield* idAllocator.allocate.providerSession({
-          providerInstanceId: modelSelection.instanceId,
-          threadId: threadEvent.threadId,
-        }),
+    const input: Parameters<
+      ProviderEventIngestor.ProviderEventIngestorV2Shape["ingestNormalized"]
+    >[0] = {
+      providerReceipt: {
+        incarnation: "retry-fixture",
+        sequence: 1,
+        consumer: "test",
+        operation: "event",
+      },
+      providerSessionId: yield* idAllocator.allocate.providerSession({
         providerInstanceId: modelSelection.instanceId,
         threadId: threadEvent.threadId,
-        event: {
-          type: "provider_turn.updated",
-          driver: CODEX_DRIVER,
-          providerTurn: {
-            id: providerTurnId,
-            providerThreadId: ProviderThreadId.make("provider-thread:locked"),
-            nodeId: NodeId.make("node:locked-turn"),
-            runAttemptId: null,
-            nativeTurnRef: null,
-            ordinal: 1,
-            status: "completed",
-            startedAt: now,
-            completedAt: now,
-          },
+      }),
+      providerInstanceId: modelSelection.instanceId,
+      threadId: threadEvent.threadId,
+      event: {
+        type: "provider_turn.updated",
+        driver: CODEX_DRIVER,
+        providerTurn: {
+          id: providerTurnId,
+          providerThreadId: ProviderThreadId.make("provider-thread:locked"),
+          nodeId: NodeId.make("node:locked-turn"),
+          runAttemptId: null,
+          nativeTurnRef: null,
+          ordinal: 1,
+          status: "completed",
+          startedAt: now,
+          completedAt: now,
         },
-        ...guard,
-      })
-      .pipe(Effect.exit);
+      },
+      ...guard,
+    };
+    const exit = yield* ingestor.ingestNormalized(input).pipe(Effect.exit);
+    if (Exit.isSuccess(exit)) assert.deepEqual(yield* ingestor.ingestNormalized(input), exit.value);
+    const receipt = yield* eventSink.readProviderReceipt(input.providerReceipt!);
     const projection = yield* projectionStore.getThreadProjection(threadEvent.threadId);
-    return { exit, providerTurnId, persisted: projection.providerTurns.map((turn) => turn.id) };
+    return {
+      exit,
+      receipt,
+      providerTurnId,
+      persisted: projection.providerTurns.map((turn) => turn.id),
+    };
   });
 
 // Neither guard matches a stored run, so a guarded write correctly commits nothing.
@@ -2244,8 +2325,9 @@ it.effect.each([
   },
 ] as const)("a provider event $route outlasts a brief database lock", ({ route, guard }) =>
   Effect.gen(function* () {
-    const { exit, providerTurnId, persisted } = yield* ingestCompletedProviderTurn(guard);
+    const { exit, receipt, providerTurnId, persisted } = yield* ingestCompletedProviderTurn(guard);
     assert.isTrue(Exit.isSuccess(exit));
+    assert.equal(receipt?.committed, route === "write");
     assert.deepEqual(persisted, route === "write" ? [providerTurnId] : []);
   }).pipe(Effect.provide(layerFailingWrites([lockTimeout, lockTimeout]))),
 );
@@ -2256,11 +2338,12 @@ it.effect.each([
   { failure: "fails for another reason", errors: [constraintFailure] },
 ])("fails a provider event write that $failure", ({ errors }) =>
   Effect.gen(function* () {
-    const { exit, persisted } = yield* ingestCompletedProviderTurn({});
+    const { exit, receipt, persisted } = yield* ingestCompletedProviderTurn({});
     assert.instanceOf(
       Exit.isFailure(exit) ? Cause.squash(exit.cause) : undefined,
       ProviderEventIngestor.ProviderEventPublishError,
     );
     assert.isEmpty(persisted);
+    assert.isUndefined(receipt);
   }).pipe(Effect.provide(layerFailingWrites(errors))),
 );

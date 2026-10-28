@@ -42,6 +42,7 @@ import { makeProviderFailureTurnItem } from "@t3tools/provider-core/server/failu
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import { stripUnservedToolOutputImageBytes } from "./toolOutputImageBytes.ts";
 import { boundFileChangeForStorage } from "./WireProjection.ts";
+import type { ProviderEventReceiptKey } from "./ProviderEventReceipts.ts";
 
 export class ProviderEventNormalizeError extends Schema.TaggedError<ProviderEventNormalizeError>()(
   "ProviderEventNormalizeError",
@@ -282,6 +283,7 @@ export interface ProviderEventIngestInput {
   readonly runId?: RunId;
   readonly nodeId?: NodeId;
   readonly rawEventId?: RawEventId;
+  readonly providerReceipt?: ProviderEventReceiptKey;
   readonly event: ProviderAdapter.ProviderAdapterV2Event;
   readonly analyticsContext?: ProviderTurnAnalyticsContext;
 }
@@ -457,7 +459,16 @@ export const layer: Layer.Layer<
               },
               occurredAt: now,
             });
-            return yield* eventSink.write({ events: [event] }).pipe(retryLockTimeout);
+            return yield* eventSink
+              .write({
+                events: [event],
+                ...(input.providerReceipt === undefined
+                  ? {}
+                  : {
+                      providerReceipt: { ...input.providerReceipt, operation: "subagent-model" },
+                    }),
+              })
+              .pipe(retryLockTimeout);
           }),
         );
       },
@@ -751,8 +762,22 @@ export const layer: Layer.Layer<
         /* This helper runs for individual orchestration events; the enclosing operation owns the span. */
         Effect.fnUntraced(
           function* (input) {
+            const providerReceipt = input.providerReceipt;
+            if (providerReceipt !== undefined) {
+              const recorded = yield* eventSink.readProviderReceipt(providerReceipt).pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderEventPublishError({
+                      providerSessionId: input.providerSessionId,
+                      eventCount: 0,
+                      cause,
+                    }),
+                ),
+              );
+              if (recorded !== undefined) return recorded.storedEvents;
+            }
             const events = yield* normalize(input);
-            if (events.length === 0) {
+            if (events.length === 0 && providerReceipt === undefined) {
               return [];
             }
             const mapWriteError = (cause: unknown) =>
@@ -764,6 +789,7 @@ export const layer: Layer.Layer<
             if (input.writeIfProviderThreadOwner !== undefined) {
               const ownerResult = yield* eventSink
                 .writeIfProviderThreadOwner({
+                  ...(providerReceipt === undefined ? {} : { providerReceipt }),
                   guardPendingUserInputCancellations: true,
                   ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
                   ...input.writeIfProviderThreadOwner,
@@ -775,6 +801,7 @@ export const layer: Layer.Layer<
             if (input.writeIfRunCurrent === undefined) {
               return yield* eventSink
                 .write({
+                  ...(providerReceipt === undefined ? {} : { providerReceipt }),
                   guardPendingUserInputCancellations: true,
                   ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
                   events,
@@ -783,6 +810,7 @@ export const layer: Layer.Layer<
             }
             const result = yield* eventSink
               .writeIfRunCurrent({
+                ...(providerReceipt === undefined ? {} : { providerReceipt }),
                 guardPendingUserInputCancellations: true,
                 ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
                 threadId: input.threadId,
@@ -819,7 +847,17 @@ export const layer: Layer.Layer<
                     payload: { ...child, branch, updatedAt: now },
                     occurredAt: now,
                   });
-                  const synced = yield* eventSink.write({ events: [event] });
+                  const synced = yield* eventSink.write({
+                    events: [event],
+                    ...(input.providerReceipt === undefined
+                      ? {}
+                      : {
+                          providerReceipt: {
+                            ...input.providerReceipt,
+                            operation: "child-worktree",
+                          },
+                        }),
+                  });
                   return [...storedEvents, ...synced];
                 }).pipe(
                   Effect.catchCause((cause) =>

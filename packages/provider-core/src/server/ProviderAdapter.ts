@@ -75,6 +75,35 @@ export const ProviderAdapterV2SessionStatus = Schema.Literals([
 ]);
 export type ProviderAdapterV2SessionStatus = typeof ProviderAdapterV2SessionStatus.Type;
 
+export const ProviderAdapterV2TerminalEvent = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("turn.terminal"),
+    driver: ProviderDriverKind,
+    providerThreadId: ProviderThreadId,
+    providerTurnId: ProviderTurnId,
+    runOrdinal: PositiveInt,
+    status: Schema.Literals(["completed", "interrupted", "cancelled"]),
+    failure: Schema.Null,
+    threadDisposition: Schema.Literals(["reusable", "broken"]),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("turn.terminal"),
+    driver: ProviderDriverKind,
+    providerThreadId: ProviderThreadId,
+    providerTurnId: ProviderTurnId,
+    runOrdinal: PositiveInt,
+    failureItemOrdinal: PositiveInt,
+    status: Schema.Literal("failed"),
+    failure: OrchestrationV2ProviderFailure,
+    retry: Schema.optional(OrchestrationV2ProviderRetry),
+    retryStartedAt: Schema.optional(Schema.DateTimeUtc),
+    threadDisposition: Schema.Literals(["reusable", "broken"]),
+    /** Child turns outlive root failure and report their own terminals; otherwise open children settle. */
+    childTurnsContinue: Schema.optional(Schema.Literal(true)),
+  }),
+]);
+export type ProviderAdapterV2TerminalEvent = typeof ProviderAdapterV2TerminalEvent.Type;
+
 export const ProviderAdapterV2Event = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("app_thread.created"),
@@ -138,31 +167,7 @@ export const ProviderAdapterV2Event = Schema.Union([
     driver: ProviderDriverKind,
     plan: OrchestrationV2PlanArtifact,
   }),
-  Schema.Struct({
-    type: Schema.Literal("turn.terminal"),
-    driver: ProviderDriverKind,
-    providerThreadId: ProviderThreadId,
-    providerTurnId: ProviderTurnId,
-    runOrdinal: PositiveInt,
-    status: Schema.Literals(["completed", "interrupted", "cancelled"]),
-    failure: Schema.Null,
-    threadDisposition: Schema.Literals(["reusable", "broken"]),
-  }),
-  Schema.Struct({
-    type: Schema.Literal("turn.terminal"),
-    driver: ProviderDriverKind,
-    providerThreadId: ProviderThreadId,
-    providerTurnId: ProviderTurnId,
-    runOrdinal: PositiveInt,
-    failureItemOrdinal: PositiveInt,
-    status: Schema.Literal("failed"),
-    failure: OrchestrationV2ProviderFailure,
-    retry: Schema.optional(OrchestrationV2ProviderRetry),
-    retryStartedAt: Schema.optional(Schema.DateTimeUtc),
-    threadDisposition: Schema.Literals(["reusable", "broken"]),
-    /** Child turns outlive root failure and report their own terminals; otherwise open children settle. */
-    childTurnsContinue: Schema.optional(Schema.Literal(true)),
-  }),
+  ...ProviderAdapterV2TerminalEvent.members,
 ]);
 export type ProviderAdapterV2Event = typeof ProviderAdapterV2Event.Type;
 

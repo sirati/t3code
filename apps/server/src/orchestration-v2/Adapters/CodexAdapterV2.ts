@@ -134,6 +134,7 @@ import * as ProviderContinuationRequests from "@t3tools/provider-core/server/Pro
 import { backgroundWorkNotification } from "@t3tools/provider-core/server/notification";
 import {
   makeProviderFailure,
+  proxyRecoveryIdFromText,
   makeProviderFailureTurnItem,
   makeProviderRetryTurnItem,
 } from "@t3tools/provider-core/server/failure";
@@ -4498,6 +4499,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 failure: withCodexManagedFailure(
                   makeProviderFailure({
                     message: payload.error.additionalDetails?.trim() || payload.error.message,
+                    proxyRecoveryId: proxyRecoveryIdFromText(payload.error.message),
                     code: notificationCode,
                     class: codexUsageLimitError(notificationCode, payload.error.codexErrorInfo)
                       ? "usage_limit"
@@ -4520,6 +4522,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             const additionalDetails = payload.error.additionalDetails?.trim();
             const failure = withCodexManagedFailure(
               makeProviderFailure({
+                proxyRecoveryId: proxyRecoveryIdFromText(payload.error.message),
                 message:
                   additionalDetails === undefined || additionalDetails.length === 0
                     ? payload.error.message

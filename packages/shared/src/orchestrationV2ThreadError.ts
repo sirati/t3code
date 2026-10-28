@@ -46,6 +46,7 @@ export function threadErrorSummary(
   return {
     usageLimitResetAt:
       currentFailure?.class === "usage_limit" ? (currentFailure.resetAt ?? null) : null,
+    proxyRecoveryId: currentFailure?.proxyRecoveryId ?? null,
     lastError: sessionError ?? failure?.message ?? null,
     lastErrorClass: currentFailure?.class ?? null,
     lastErrorCode: currentFailure?.code ?? null,

@@ -178,6 +178,7 @@ import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderS
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import {
   makeProviderFailure,
+  proxyRecoveryIdFromText,
   makeProviderRetryTurnItem,
 } from "@t3tools/provider-core/server/failure";
 import { turnScopedSelectionTransition } from "@t3tools/provider-core/server/selectionTransition";
@@ -3582,6 +3583,11 @@ function providerFailureFromResult(
   failureHint?: string,
   usageLimited = false,
 ): OrchestrationV2ProviderFailure | null {
+  const proxyRecoveryId = proxyRecoveryIdFromText(
+    [failureHint, message.subtype === "success" ? message.result : message.errors.join("\n")].join(
+      "\n",
+    ),
+  );
   const gatewayLimit =
     failureHint === undefined &&
     message.subtype === "success" &&
@@ -3600,6 +3606,7 @@ function providerFailureFromResult(
     const resetMs = DateTime.toEpochMillis(completedAt) + seconds * 1_000;
     if (seconds > 0 && resetMs < 8.64e15) {
       return makeProviderFailure({
+        proxyRecoveryId,
         class: "usage_limit",
         message: "Claude API rate limit reached. Try again later.",
         code: "api_error_429",
@@ -3626,6 +3633,7 @@ function providerFailureFromResult(
       : terminalResultError(message.terminal_reason, failureHint ?? apiErrorMessage);
   if (message.subtype !== "success") {
     return makeProviderFailure({
+      proxyRecoveryId,
       message: listedError ?? structuredError ?? message.errors.join("\n"),
       code: message.subtype,
       class: failureClass,
@@ -3636,6 +3644,7 @@ function providerFailureFromResult(
   }
   const apiErrorStatus = message.api_error_status ?? null;
   return makeProviderFailure({
+    proxyRecoveryId,
     message: listedError ?? structuredError ?? failureHint ?? message.result,
     code:
       apiErrorStatus === null

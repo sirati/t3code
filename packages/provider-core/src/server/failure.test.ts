@@ -51,6 +51,17 @@ it("does not split a surrogate pair at the truncation boundary", () => {
   assert.notMatch(failure.message.slice(0, -1), /[\uD800-\uDBFF]$/u);
 });
 
+it("retains proxy recovery tickets before truncating messages, including failures with no reset time", () => {
+  const failure = makeProviderFailure({
+    class: "provider_error",
+    message: `${"busy ".repeat(1000)}[cliproxy-recovery:K5wVx3M9Sq1zAx7B]`,
+  });
+  assert.equal(failure.class, "usage_limit");
+  assert.equal(failure.proxyRecoveryId, "K5wVx3M9Sq1zAx7B");
+  assert.isUndefined(failure.resetAt);
+  assert.isUndefined(makeProviderFailure({ message: "[cliproxy-recovery:short]" }).proxyRecoveryId);
+});
+
 it("does not expose arbitrary cause messages and preserves explicit messages", () => {
   const cause = new Error("Adapter failed", {
     cause: new Error("Session expired. Sign in again."),

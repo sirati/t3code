@@ -321,6 +321,118 @@ it("shows live bars in the saved field and moves the selection and submission on
   await vi.waitFor(() => expect(second.style.paddingInlineEnd).toBe(originalPadding));
 });
 
+it("docks composer dictation by its actions and reserves no text space for hidden controls", async () => {
+  // router: false because this fixture checks native field and composer toolbar geometry.
+  await using screen = await render(
+    <>
+      <div data-chat-composer-surface="" style={{ width: 360 }}>
+        <div data-dictation-composer-editor="">
+          <textarea
+            aria-label="thread composer"
+            style={{ width: "100%", padding: 8 }}
+            defaultValue="A draft whose text must retain the same width while dictation is active."
+          />
+        </div>
+        <div
+          role="group"
+          aria-label="Composer actions"
+          style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}
+        >
+          <button type="button">Attach</button>
+          <span
+            data-dictation-composer-controls=""
+            className="flex shrink-0 items-center empty:hidden"
+          />
+          <button type="button">Submit</button>
+        </div>
+        <div
+          role="group"
+          aria-label="Collapsed composer actions"
+          data-testid="collapsed-dictation-actions"
+          style={{ display: "none", justifyContent: "flex-end", gap: 8 }}
+        >
+          <span
+            data-dictation-composer-controls=""
+            className="flex shrink-0 items-center empty:hidden"
+          />
+          <button type="button">Expand</button>
+        </div>
+      </div>
+      <input aria-label="other field" style={{ width: 320, padding: 8 }} />
+      <DictationIndicators />
+    </>,
+    { router: false },
+  );
+  using bridge = installDictationBridge();
+  const stop = startDictationTargets();
+  using _cleanup = { [Symbol.dispose]: stop };
+  const composer = screen
+    .getByRole("textbox", { name: "thread composer" })
+    .element() as HTMLTextAreaElement;
+  const other = screen.getByRole("textbox", { name: "other field" }).element() as HTMLInputElement;
+  const originalComposerPadding = getComputedStyle(composer).paddingInlineEnd;
+  const originalComposerHeight = composer.scrollHeight;
+  const originalOtherPadding = other.style.paddingInlineEnd;
+  const actions = screen
+    .getByRole("group", { name: "Composer actions", exact: true })
+    .element() as HTMLElement;
+  const collapsedActions = screen
+    .getByTestId("collapsed-dictation-actions")
+    .element() as HTMLElement;
+  const slot = actions.querySelector<HTMLElement>("[data-dictation-composer-controls]")!;
+  expect(getComputedStyle(slot).display).toBe("none");
+  composer.focus();
+  await bridge.deliver({
+    kind: "offer",
+    session: "docked",
+    audio: { level: true, spectrum: false },
+  });
+  const active = {
+    kind: "active" as const,
+    phase: "recording" as const,
+    session: "docked",
+    provider: "Speech",
+    owned: true,
+    canMove: true,
+    revision: 0,
+    audio: { level: true, spectrum: false },
+  };
+  await bridge.deliver(active);
+  const bars = page.getByRole("img", { name: "Receiving dictation: thread composer", exact: true });
+  await expect.element(bars).toBeVisible();
+  expect(bars.element().closest("[data-dictation-composer-controls]")).not.toBeNull();
+  expect(getComputedStyle(composer).paddingInlineEnd).toBe(originalComposerPadding);
+  expect(composer.scrollHeight).toBe(originalComposerHeight);
+  const move = page.getByRole("button", { name: "Move dictation here: other field", exact: true });
+  await expect.element(move).toBeVisible();
+  const overlay = move.element().closest<HTMLElement>("[data-dictation-indicators]")!;
+  expect(
+    Math.abs(overlay.getBoundingClientRect().right - (other.getBoundingClientRect().right - 4)),
+  ).toBeLessThan(1);
+  await bridge.deliver({ ...active, phase: "processing", canMove: false });
+  const processing = page.getByRole("status", {
+    name: "Processing dictation: thread composer",
+    exact: true,
+  });
+  await expect.element(processing).toBeVisible();
+  expect(processing.element().closest("[data-dictation-composer-controls]")).not.toBeNull();
+  await expect.element(move).not.toBeInTheDocument();
+  await vi.waitFor(() => expect(other.style.paddingInlineEnd).toBe(originalOtherPadding));
+  expect(getComputedStyle(composer).paddingInlineEnd).toBe(originalComposerPadding);
+  expect(composer.scrollHeight).toBe(originalComposerHeight);
+  actions.style.display = "none";
+  collapsedActions.style.display = "flex";
+  composer.style.display = "none";
+  await vi.waitFor(() => expect(collapsedActions.contains(processing.element())).toBe(true));
+  await expect.element(processing).toBeVisible();
+  await bridge.deliver({ kind: "cancelled", session: "docked" });
+  await vi.waitFor(() =>
+    expect(
+      collapsedActions.querySelector("[data-dictation-composer-controls]")!.childElementCount,
+    ).toBe(0),
+  );
+});
+
 it("offers moves only for the new recording while the previous session is processing", async () => {
   // router: false because two broker sessions share isolated input fields.
   await using screen = await render(

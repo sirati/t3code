@@ -18,6 +18,7 @@ interface Field {
   top: number;
   width: number;
   height: number;
+  dock: HTMLElement | null;
 }
 
 function VoiceBars({ session, label }: { session: DictationSessionView; label: string }) {
@@ -87,13 +88,15 @@ export function DictationIndicators() {
 function ActiveDictationIndicators({ sessions }: { sessions: readonly DictationSessionView[] }) {
   const [fields, setFields] = useState<readonly Field[]>([]);
   const count = sessions.length;
+  // Loudness updates must not rebuild observers or temporarily change input padding.
+  const layoutKey = JSON.stringify(sessions.map(({ targetId, canMove }) => [targetId, canMove]));
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Observe native and registered editor bounds while dictation is active, releasing observers and field references when it ends.
   useLayoutEffect(() => {
+    const destinations = JSON.parse(layoutKey) as readonly (readonly [string | null, boolean])[];
     let stopped = false;
     let queued = false;
     let elements: HTMLElement[] = [];
     const padding = new Map<HTMLElement, { value: string; priority: string; applied: string }>();
-    const width = count * 44 + 4;
     const restore = (element: HTMLElement) => {
       const original = padding.get(element);
       if (!original) return;
@@ -108,14 +111,34 @@ function ActiveDictationIndicators({ sessions }: { sessions: readonly DictationS
       if (stopped) return;
       const next: Field[] = [];
       for (const element of elements) {
-        if (!element.isConnected || !isDictationElement(element) || !element.checkVisibility())
+        const id = dictationTargetId(element);
+        const visibleCount = destinations.filter(
+          ([targetId, canMove]) => targetId === id || canMove,
+        ).length;
+        const composer = element
+          .closest("[data-dictation-composer-editor]")
+          ?.closest("[data-chat-composer-surface]");
+        const dock = composer
+          ? ([...composer.querySelectorAll<HTMLElement>("[data-dictation-composer-controls]")].find(
+              (slot) => slot.parentElement?.checkVisibility(),
+            ) ?? null)
+          : null;
+        if (
+          !element.isConnected ||
+          !isDictationElement(element) ||
+          (!dock && !element.checkVisibility()) ||
+          visibleCount === 0 ||
+          (composer && !dock)
+        ) {
+          restore(element);
           continue;
-        const rect = element.getBoundingClientRect();
+        }
+        const rect = (dock?.parentElement ?? element).getBoundingClientRect();
         let left = Math.max(0, rect.left),
           top = Math.max(0, rect.top);
         let right = Math.min(window.innerWidth, rect.right),
           bottom = Math.min(window.innerHeight, rect.bottom);
-        for (let parent = element.parentElement; parent; parent = parent.parentElement) {
+        for (let parent = (dock ?? element).parentElement; parent; parent = parent.parentElement) {
           const style = getComputedStyle(parent);
           const bounds = parent.getBoundingClientRect();
           if (/(hidden|auto|scroll|clip)/.test(style.overflowX)) {
@@ -127,16 +150,34 @@ function ActiveDictationIndicators({ sessions }: { sessions: readonly DictationS
             bottom = Math.min(bottom, bounds.bottom);
           }
         }
-        if (right - left < 28 || bottom - top < 20) continue;
+        if (right - left < 28 || bottom - top < 20 || (!dock && right < rect.right - 1)) {
+          restore(element);
+          continue;
+        }
         const hit = document.elementFromPoint(left + 3, top + Math.min(8, (bottom - top) / 2));
-        if (!hit || !element.contains(hit)) continue;
+        if (!dock && (!hit || !element.contains(hit))) {
+          restore(element);
+          continue;
+        }
+        if (dock) restore(element);
+        else if (!padding.has(element)) {
+          const width = visibleCount * 44 - 4;
+          const applied = `${Math.max(width + 8, parseFloat(getComputedStyle(element).paddingInlineEnd) || 0)}px`;
+          padding.set(element, {
+            value: element.style.getPropertyValue("padding-inline-end"),
+            priority: element.style.getPropertyPriority("padding-inline-end"),
+            applied,
+          });
+          element.style.paddingInlineEnd = applied;
+        }
         const labels =
           element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement
             ? element.labels
             : null;
         next.push({
           element,
-          id: dictationTargetId(element),
+          id,
+          dock,
           label:
             element.getAttribute("aria-label") ??
             labels?.[0]?.textContent?.trim() ??
@@ -156,6 +197,7 @@ function ActiveDictationIndicators({ sessions }: { sessions: readonly DictationS
             other &&
             field.element === other.element &&
             field.id === other.id &&
+            field.dock === other.dock &&
             field.label === other.label &&
             field.left === other.left &&
             field.top === other.top &&
@@ -182,13 +224,6 @@ function ActiveDictationIndicators({ sessions }: { sessions: readonly DictationS
         }
       for (const element of next)
         if (!elements.includes(element)) {
-          const applied = `${Math.max(width + 8, parseFloat(getComputedStyle(element).paddingInlineEnd) || 0)}px`;
-          padding.set(element, {
-            value: element.style.getPropertyValue("padding-inline-end"),
-            priority: element.style.getPropertyPriority("padding-inline-end"),
-            applied,
-          });
-          element.style.paddingInlineEnd = applied;
           resized.set(element, observeResize(element, measure));
         }
       elements = next;
@@ -234,46 +269,61 @@ function ActiveDictationIndicators({ sessions }: { sessions: readonly DictationS
       for (const element of padding.keys()) restore(element);
       elements = [];
     };
-  }, [count]);
-  return createPortal(
-    <div data-dictation-indicators="" className="pointer-events-none fixed inset-0 z-[60]">
-      {fields.map((field) => (
-        <div
-          key={field.id}
-          className="absolute flex items-center gap-1 rounded-md bg-background/95"
-          style={{
-            left: field.left + field.width - (count * 44 + 4),
-            top: field.top + Math.max(0, (Math.min(field.height, 32) - 24) / 2),
-          }}
-        >
-          {sessions.map((session) =>
-            session.targetId === field.id ? (
-              <VoiceBars key={session.session} session={session} label={field.label} />
-            ) : session.canMove ? (
-              <Tooltip key={session.session}>
-                <TooltipTrigger render={<span className="pointer-events-auto" />}>
-                  <Button
-                    variant="ghost-muted"
-                    size="icon-xs"
-                    aria-label={`Move dictation here: ${field.label}${count > 1 ? ` (${session.provider})` : ""}`}
-                    onMouseDown={(event) => event.preventDefault()}
-                    onClick={() => {
-                      void dictationState.getState().move?.(session.session, field.element);
-                    }}
-                  >
-                    <span className="relative flex size-5 items-center">
-                      <AudioLines size={14} />
-                      <ArrowDownToLine size={10} className="absolute -right-0.5 bottom-0" />
-                    </span>
-                  </Button>
-                </TooltipTrigger>
-                <TooltipPopup>Move ongoing dictation here</TooltipPopup>
-              </Tooltip>
-            ) : null,
-          )}
-        </div>
-      ))}
-    </div>,
-    document.body,
-  );
+  }, [layoutKey]);
+  return fields.map((field) => {
+    const visibleSessions = sessions.filter(
+      (session) => session.targetId === field.id || session.canMove,
+    );
+    if (!visibleSessions.length) return null;
+    return createPortal(
+      <span
+        data-dictation-indicators=""
+        className={
+          field.dock
+            ? "pointer-events-none flex shrink-0 items-center gap-1"
+            : "pointer-events-none fixed z-[60] flex items-center gap-1 rounded-md bg-background/95"
+        }
+        style={
+          field.dock
+            ? undefined
+            : {
+                left: field.left + field.width - (visibleSessions.length * 44 - 4) - 4,
+                top: field.top + Math.max(0, (Math.min(field.height, 32) - 24) / 2),
+              }
+        }
+      >
+        {visibleSessions.map((session) =>
+          session.targetId === field.id ? (
+            <VoiceBars key={session.session} session={session} label={field.label} />
+          ) : session.canMove ? (
+            <Tooltip key={session.session}>
+              <TooltipTrigger
+                render={
+                  <span className="pointer-events-auto flex w-10 items-center justify-center" />
+                }
+              >
+                <Button
+                  variant="ghost-muted"
+                  size="icon-xs"
+                  aria-label={`Move dictation here: ${field.label}${count > 1 ? ` (${session.provider})` : ""}`}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => {
+                    void dictationState.getState().move?.(session.session, field.element);
+                  }}
+                >
+                  <span className="relative flex size-5 items-center">
+                    <AudioLines size={14} />
+                    <ArrowDownToLine size={10} className="absolute -right-0.5 bottom-0" />
+                  </span>
+                </Button>
+              </TooltipTrigger>
+              <TooltipPopup>Move ongoing dictation here</TooltipPopup>
+            </Tooltip>
+          ) : null,
+        )}
+      </span>,
+      field.dock ?? document.body,
+      field.id,
+    );
+  });
 }

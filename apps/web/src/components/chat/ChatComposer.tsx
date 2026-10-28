@@ -3553,6 +3553,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     (showProviderUnavailable ? "Enable a provider in Settings" : "Ask anything...")}
                 </button>
                 {collapsedComposerImagePreviews}
+                <span
+                  data-dictation-composer-controls=""
+                  className="flex shrink-0 items-center empty:hidden"
+                />
                 <button
                   type="button"
                   data-chat-composer-transition-actions="true"
@@ -3661,6 +3665,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               {composerAttachmentFileList}
 
               <div
+                data-dictation-composer-editor=""
                 className={cn("relative", isComposerResting && "flex min-w-0 items-center gap-1")}
                 style={
                   isComposerResting && restingActionsWidth !== null
@@ -3760,6 +3765,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     data-chat-composer-mobile-pending-actions="true"
                     className="absolute bottom-0 right-0 flex items-center justify-end gap-1"
                   >
+                    <span
+                      data-dictation-composer-controls=""
+                      className="flex shrink-0 items-center empty:hidden"
+                    />
                     <ComposerPrimaryActions
                       compact
                       canOperateThread={canOperateThread}
@@ -3828,6 +3837,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   className="flex shrink-0 flex-nowrap items-center justify-end gap-2"
                 >
                   {composerAttachButton}
+                  <span
+                    data-dictation-composer-controls=""
+                    className="flex shrink-0 items-center empty:hidden"
+                  />
                   <ComposerFooterPrimaryActions
                     compact={isComposerResting || isComposerPrimaryActionsCompact}
                     canOperateThread={canOperateThread}

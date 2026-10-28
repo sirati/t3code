@@ -211,7 +211,7 @@ export const layer = ProviderSessionRpc.toLayer(
                 }),
             ),
           );
-          return yield* host.withTurn(
+          yield* host.withTurn(
             request.sessionId,
             request.lease,
             {
@@ -220,6 +220,7 @@ export const layer = ProviderSessionRpc.toLayer(
             },
             (runtime) => invoke(runtime).pipe(Effect.asVoid),
           );
+          return null;
         }
         return yield* host.withRuntime(request.sessionId, request.lease, invoke);
       }),

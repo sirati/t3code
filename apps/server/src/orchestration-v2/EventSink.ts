@@ -34,6 +34,7 @@ import * as EventStore from "./EventStore.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProjectStore from "./ProjectStore.ts";
 import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
+import * as ProviderEventReceipts from "./ProviderEventReceipts.ts";
 
 export class EventSinkWriteError extends Schema.TaggedError<EventSinkWriteError>()(
   "EventSinkWriteError",
@@ -67,6 +68,8 @@ export const EventSinkV2Error = Schema.Union([EventSinkWriteError, EventSinkStre
 export type EventSinkV2Error = typeof EventSinkV2Error.Type;
 
 export interface EventSinkV2Shape {
+  readonly readProviderReceipt: ProviderEventReceipts.ProviderEventReceipts["Service"]["read"];
+  readonly pruneProviderReceipts: ProviderEventReceipts.ProviderEventReceipts["Service"]["prune"];
   readonly write: (input: {
     /** Return no events if another thread owns this native session at commit time. */
     readonly unlessNativeThreadOwned?: Pick<
@@ -75,6 +78,7 @@ export interface EventSinkV2Shape {
     >;
     readonly guardPendingUserInputCancellations?: boolean;
     readonly commandId?: CommandId;
+    readonly providerReceipt?: ProviderEventReceipts.ProviderEventReceiptKey;
     readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
   }) => Effect.Effect<ReadonlyArray<OrchestrationV2StoredEvent>, EventSinkV2Error>;
   readonly writeWithEffects: (input: {
@@ -89,12 +93,14 @@ export interface EventSinkV2Shape {
     >;
     readonly guardPendingUserInputCancellations?: boolean;
     readonly commandId?: CommandId;
+    readonly providerReceipt?: ProviderEventReceipts.ProviderEventReceiptKey;
     readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
     readonly effects: ReadonlyArray<EffectOutbox.PendingOrchestrationEffectV2>;
   }) => Effect.Effect<ReadonlyArray<OrchestrationV2StoredEvent>, EventSinkV2Error>;
   readonly writeIfRunCurrent: (input: {
     readonly guardPendingUserInputCancellations?: boolean;
     readonly commandId?: CommandId;
+    readonly providerReceipt?: ProviderEventReceipts.ProviderEventReceiptKey;
     readonly threadId: ThreadId;
     readonly runId: RunId;
     readonly activeAttemptId: RunAttemptId;
@@ -112,6 +118,7 @@ export interface EventSinkV2Shape {
   readonly writeIfProviderThreadOwner: (input: {
     readonly guardPendingUserInputCancellations?: boolean;
     readonly commandId?: CommandId;
+    readonly providerReceipt?: ProviderEventReceipts.ProviderEventReceiptKey;
     readonly providerThreadId: ProviderThreadId;
     readonly runId: RunId;
     readonly activeAttemptId: RunAttemptId;
@@ -214,6 +221,7 @@ const layerBase: Layer.Layer<
   EventSinkV2,
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
+    const providerReceipts = yield* ProviderEventReceipts.ProviderEventReceipts;
     const commandReceipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
     const effectOutbox = yield* EffectOutbox.EffectOutboxV2;
     const eventStore = yield* EventStore.EventStoreV2;
@@ -282,6 +290,28 @@ const layerBase: Layer.Layer<
             ),
           );
       });
+
+    // Receipt checks share the enclosing event writer's span.
+    const withProviderReceipt = Effect.fnUntraced(function* <E, R>(
+      key: ProviderEventReceipts.ProviderEventReceiptKey | undefined,
+      transaction: Effect.Effect<
+        {
+          readonly committed: boolean;
+          readonly storedEvents: ReadonlyArray<OrchestrationV2StoredEvent>;
+          readonly outcomes: ReadonlyArray<RunOutcome>;
+        },
+        E,
+        R
+      >,
+    ) {
+      if (key !== undefined) {
+        const recorded = yield* providerReceipts.read(key);
+        if (recorded !== undefined) return { ...recorded, outcomes: [], replayed: true };
+      }
+      const result = yield* transaction;
+      if (key !== undefined) yield* providerReceipts.record(key, result);
+      return { ...result, replayed: false };
+    });
 
     // A user can answer after terminal normalization reads the pending request.
     // Recheck inside the write transaction so stale cleanup cannot erase answers.
@@ -416,12 +446,14 @@ const layerBase: Layer.Layer<
         "orchestration_v2.thread_id": input.events[0]?.threadId ?? null,
       });
 
-      const { committed } = yield* commitThenPublish(
-        Effect.gen(function* () {
-          // Check ownership in the same transaction that claims the native session.
-          const imported = input.unlessNativeThreadOwned;
-          if (imported?.nativeThreadRef != null) {
-            const owners = yield* sql`
+      const { storedEvents } = yield* commitThenPublish(
+        withProviderReceipt(
+          input.providerReceipt,
+          Effect.gen(function* () {
+            // Check ownership in the same transaction that claims the native session.
+            const imported = input.unlessNativeThreadOwned;
+            if (imported?.nativeThreadRef != null) {
+              const owners = yield* sql`
               SELECT provider_thread_id
               FROM orchestration_v2_projection_provider_threads
               WHERE driver = ${imported.driver}
@@ -430,35 +462,37 @@ const layerBase: Layer.Layer<
                 AND json_extract(payload_json, '$.nativeThreadRef.nativeId') = ${imported.nativeThreadRef.nativeId}
               LIMIT 1
             `;
-            if (owners.length > 0) return { committed: [], outcomes: [] };
-          }
-          // Checkpoint capture can finish after a cohort writer reads its parent run.
-          // Merge in this transaction so the event log and projection keep that completion.
-          const events = input.updateDelegatedCompletionOnly
-            ? yield* updateDelegatedCompletionOnly(input.events, () => true)
-            : input.events;
-          const normalized = yield* normalizeEvents(
-            input.guardPendingUserInputCancellations === true
-              ? yield* guardUserInputCancellations(events)
-              : events,
-          );
-          const committed = yield* eventStore.append({
-            ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
-            events: normalized,
-          });
-          const outcomes = yield* applyStoredEvents(committed);
-          yield* effectOutbox.enqueue(input.effects);
-          return { committed, outcomes };
-        }).pipe(Effect.withTracerEnabled(false)),
-        ({ committed, outcomes }) =>
+              if (owners.length > 0) return { committed: false, storedEvents: [], outcomes: [] };
+            }
+            // Checkpoint capture can finish after a cohort writer reads its parent run.
+            // Merge in this transaction so the event log and projection keep that completion.
+            const events = input.updateDelegatedCompletionOnly
+              ? yield* updateDelegatedCompletionOnly(input.events, () => true)
+              : input.events;
+            const normalized = yield* normalizeEvents(
+              input.guardPendingUserInputCancellations === true
+                ? yield* guardUserInputCancellations(events)
+                : events,
+            );
+            const committed = yield* eventStore.append({
+              ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
+              events: normalized,
+            });
+            const outcomes = yield* applyStoredEvents(committed);
+            yield* effectOutbox.enqueue(input.effects);
+            return { committed: true, storedEvents: committed, outcomes };
+          }),
+        ).pipe(Effect.withTracerEnabled(false)),
+        ({ storedEvents, outcomes, replayed }) =>
           Effect.gen(function* () {
+            if (replayed) return;
             if (input.effects.length > 0) {
               yield* effectOutbox.notifyAvailable(input.effects.length);
             }
-            yield* publishStoredEvents(committed, outcomes);
+            yield* publishStoredEvents(storedEvents, outcomes);
           }),
       );
-      return committed;
+      return storedEvents;
     });
 
     const writeIfRunCurrentEffect = Effect.fn("orchestrationV2.EventSink.writeIfRunCurrent")(
@@ -471,11 +505,13 @@ const layerBase: Layer.Layer<
         });
 
         return yield* commitThenPublish(
-          Effect.gen(function* () {
-            const rows = yield* sql<{
-              readonly status: string;
-              readonly active_attempt_id: string | null;
-            }>`
+          withProviderReceipt(
+            input.providerReceipt,
+            Effect.gen(function* () {
+              const rows = yield* sql<{
+                readonly status: string;
+                readonly active_attempt_id: string | null;
+              }>`
             SELECT
               status,
               json_extract(payload_json, '$.activeAttemptId') AS active_attempt_id
@@ -484,34 +520,36 @@ const layerBase: Layer.Layer<
               AND thread_id = ${input.threadId}
             LIMIT 1
           `;
-            const current = rows[0];
-            if (
-              current === undefined ||
-              current.status !== input.expectedStatus ||
-              current.active_attempt_id !== input.activeAttemptId
-            ) {
-              return {
-                committed: false as const,
-                storedEvents: [] as ReadonlyArray<OrchestrationV2StoredEvent>,
-              };
-            }
+              const current = rows[0];
+              if (
+                current === undefined ||
+                current.status !== input.expectedStatus ||
+                current.active_attempt_id !== input.activeAttemptId
+              ) {
+                return {
+                  committed: false as const,
+                  storedEvents: [] as ReadonlyArray<OrchestrationV2StoredEvent>,
+                  outcomes: [],
+                };
+              }
 
-            const normalized = yield* normalizeEvents(
-              input.guardPendingUserInputCancellations === true
-                ? yield* guardUserInputCancellations(input.events)
-                : input.events,
-            );
-            const storedEvents = yield* eventStore.append({
-              ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
-              events: normalized,
-            });
-            const outcomes = yield* applyStoredEvents(storedEvents);
-            yield* effectOutbox.enqueue(input.effects ?? []);
-            return { committed: true as const, storedEvents, outcomes };
-          }),
+              const normalized = yield* normalizeEvents(
+                input.guardPendingUserInputCancellations === true
+                  ? yield* guardUserInputCancellations(input.events)
+                  : input.events,
+              );
+              const storedEvents = yield* eventStore.append({
+                ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
+                events: normalized,
+              });
+              const outcomes = yield* applyStoredEvents(storedEvents);
+              yield* effectOutbox.enqueue(input.effects ?? []);
+              return { committed: true as const, storedEvents, outcomes };
+            }),
+          ),
           (result) =>
             Effect.gen(function* () {
-              if (!result.committed) return;
+              if (!result.committed || result.replayed) return;
               if (input.effects !== undefined && input.effects.length > 0) {
                 yield* effectOutbox.notifyAvailable(input.effects.length);
               }
@@ -534,11 +572,13 @@ const layerBase: Layer.Layer<
       });
 
       return yield* commitThenPublish(
-        Effect.gen(function* () {
-          const rows = yield* sql<{
-            readonly active_attempt_id: string | null;
-            readonly last_run_ordinal: number | null;
-          }>`
+        withProviderReceipt(
+          input.providerReceipt,
+          Effect.gen(function* () {
+            const rows = yield* sql<{
+              readonly active_attempt_id: string | null;
+              readonly last_run_ordinal: number | null;
+            }>`
             SELECT
               json_extract(r.payload_json, '$.activeAttemptId') AS active_attempt_id,
               p.last_run_ordinal
@@ -549,32 +589,34 @@ const layerBase: Layer.Layer<
             WHERE p.provider_thread_id = ${input.providerThreadId}
             LIMIT 1
           `;
-          const current = rows[0];
-          if (
-            current === undefined ||
-            current.active_attempt_id !== input.activeAttemptId ||
-            current.last_run_ordinal !== input.expectedLastRunOrdinal
-          ) {
-            return {
-              committed: false as const,
-              storedEvents: [] as ReadonlyArray<OrchestrationV2StoredEvent>,
-            };
-          }
+            const current = rows[0];
+            if (
+              current === undefined ||
+              current.active_attempt_id !== input.activeAttemptId ||
+              current.last_run_ordinal !== input.expectedLastRunOrdinal
+            ) {
+              return {
+                committed: false as const,
+                storedEvents: [] as ReadonlyArray<OrchestrationV2StoredEvent>,
+                outcomes: [],
+              };
+            }
 
-          const normalized = yield* normalizeEvents(
-            input.guardPendingUserInputCancellations === true
-              ? yield* guardUserInputCancellations(input.events)
-              : input.events,
-          );
-          const storedEvents = yield* eventStore.append({
-            ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
-            events: normalized,
-          });
-          const outcomes = yield* applyStoredEvents(storedEvents);
-          return { committed: true as const, storedEvents, outcomes };
-        }),
+            const normalized = yield* normalizeEvents(
+              input.guardPendingUserInputCancellations === true
+                ? yield* guardUserInputCancellations(input.events)
+                : input.events,
+            );
+            const storedEvents = yield* eventStore.append({
+              ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
+              events: normalized,
+            });
+            const outcomes = yield* applyStoredEvents(storedEvents);
+            return { committed: true as const, storedEvents, outcomes };
+          }),
+        ),
         (result) =>
-          result.committed
+          result.committed && !result.replayed
             ? publishStoredEvents(result.storedEvents, result.outcomes)
             : Effect.void,
       );
@@ -878,6 +920,8 @@ const layerBase: Layer.Layer<
     };
 
     return EventSinkV2.of({
+      readProviderReceipt: providerReceipts.read,
+      pruneProviderReceipts: providerReceipts.prune,
       write: (input) =>
         writeEffect({ ...input, effects: [] }).pipe(
           Effect.mapError(
@@ -998,7 +1042,7 @@ const layerBase: Layer.Layer<
         ),
     } satisfies EventSinkV2Shape);
   }),
-);
+).pipe(Layer.provide(ProviderEventReceipts.layer));
 
 /** Share the worker's outbox instance: enqueue wakeups are in-memory. */
 export const layerFromStores = layerBase;

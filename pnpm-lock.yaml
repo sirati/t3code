@@ -424,8 +424,8 @@ importers:
         specifier: 0.13.0
         version: 0.13.0
       '@dictation-api/client':
-        specifier: git+ssh://git@github.com/sirati/dictation-api.git#c86db0fc9d68bae526b7b6d0c0857c0d85250ee6
-        version: https://codeload.github.com/sirati/dictation-api/tar.gz/c86db0fc9d68bae526b7b6d0c0857c0d85250ee6
+        specifier: git+ssh://git@github.com/sirati/dictation-api.git#6e6c06129e7c915b7edcd93e90c7d69a80df0dd6
+        version: https://codeload.github.com/sirati/dictation-api/tar.gz/6e6c06129e7c915b7edcd93e90c7d69a80df0dd6
       '@effect/platform-node':
         specifier: 4.0.5
         version: 4.0.5(bufferutil@4.1.0)(effect@4.0.5)(redis@6.2.1)(utf-8-validate@6.0.6)
@@ -3437,8 +3437,8 @@ packages:
       '@types/react':
         optional: true
 
-  '@dictation-api/client@https://codeload.github.com/sirati/dictation-api/tar.gz/c86db0fc9d68bae526b7b6d0c0857c0d85250ee6':
-    resolution: {gitHosted: true, integrity: sha512-2GpUlf4qPJSciuiQvibkxF8cL9rFfQRuHKJESHS7AsGbTj3P69OHqqmktg3IcrK8YkxQhNL1LSDZnZZxXmGsvA==, tarball: https://codeload.github.com/sirati/dictation-api/tar.gz/c86db0fc9d68bae526b7b6d0c0857c0d85250ee6}
+  '@dictation-api/client@https://codeload.github.com/sirati/dictation-api/tar.gz/6e6c06129e7c915b7edcd93e90c7d69a80df0dd6':
+    resolution: {gitHosted: true, integrity: sha512-MAX9k8+sUOQfWo4o7FyZeHzY2JZ6opqrjJ5iFiZ+qmDQ1v2lMbkZvPkI8TpFe6Mo2iLdgDMwzKFyoR79jJAq/g==, tarball: https://codeload.github.com/sirati/dictation-api/tar.gz/6e6c06129e7c915b7edcd93e90c7d69a80df0dd6}
     version: 0.1.0
     engines: {node: '>=22'}
 
@@ -13410,7 +13410,7 @@ snapshots:
     optionalDependencies:
       '@types/react': 19.3.0
 
-  '@dictation-api/client@https://codeload.github.com/sirati/dictation-api/tar.gz/c86db0fc9d68bae526b7b6d0c0857c0d85250ee6': {}
+  '@dictation-api/client@https://codeload.github.com/sirati/dictation-api/tar.gz/6e6c06129e7c915b7edcd93e90c7d69a80df0dd6': {}
 
   '@dimforge/rapier3d-compat@0.12.0': {}
 

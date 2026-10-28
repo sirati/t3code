@@ -116,6 +116,7 @@ function layerExecutorFor(input: {
     Layer.succeed(
       ProviderTurnStartService.ProviderTurnStartServiceV2,
       ProviderTurnStartService.ProviderTurnStartServiceV2.of({
+        adopt: () => Effect.die("unused adoption"),
         start: () =>
           Effect.gen(function* () {
             yield* record("start");

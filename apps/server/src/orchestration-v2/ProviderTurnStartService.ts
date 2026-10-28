@@ -111,6 +111,11 @@ const refusedBeforePrompt = (error: unknown): boolean =>
   (Predicate.hasProperty(error, "cause") && refusedBeforePrompt(error.cause));
 
 export interface ProviderTurnStartServiceV2Shape {
+  readonly adopt: (input: {
+    readonly threadId: ThreadId;
+    readonly runId: RunId;
+    readonly session: ProviderAdapter.ProviderAdapterV2SessionRuntime;
+  }) => Effect.Effect<void, ProviderTurnStartError>;
   readonly start: (input: {
     readonly threadId: ThreadId;
     readonly runId: RunId;
@@ -1528,7 +1533,161 @@ export const layer: Layer.Layer<
       });
     });
 
+    const adopt: ProviderTurnStartServiceV2Shape["adopt"] = Effect.fn(
+      "ProviderTurnStartService.adopt",
+    )(
+      function* (input) {
+        const projection = yield* projectionStore.getThreadProjection(input.threadId);
+        const run = projection.runs.find((candidate) => candidate.id === input.runId);
+        const rootNode = projection.nodes.find((candidate) => candidate.id === run?.rootNodeId);
+        const attempt = projection.attempts.find(
+          (candidate) => candidate.id === run?.activeAttemptId,
+        );
+        const providerThread = projection.providerThreads.find(
+          (candidate) => candidate.id === run?.providerThreadId,
+        );
+        const checkpointScope = projection.checkpointScopes.find(
+          (candidate) => candidate.id === rootNode?.checkpointScopeId,
+        );
+        const message = projection.messages.find(
+          (candidate) => candidate.id === run?.userMessageId,
+        );
+        if (
+          run === undefined ||
+          rootNode === undefined ||
+          attempt === undefined ||
+          providerThread === undefined ||
+          checkpointScope === undefined ||
+          message === undefined ||
+          providerThread.providerSessionId !== input.session.providerSessionId ||
+          run.providerInstanceId !== input.session.instanceId ||
+          providerThread.driver !== input.session.driver ||
+          !(run.status === "starting" || run.status === "running" || run.status === "waiting")
+        )
+          return yield* new ProviderTurnStartError({ runId: input.runId });
+        const inheritedBackgroundTurnItems = RunExecutionService.selectInheritedBackgroundTurnItems(
+          {
+            threadId: input.threadId,
+            currentProviderThreadId: providerThread.id,
+            currentRunOrdinal: run.ordinal,
+            runs: projection.runs,
+            turnItems: projection.turnItems,
+          },
+        );
+        const controls = makeRunControls({
+          threadId: input.threadId,
+          runId: run.id,
+          attemptId: attempt.id,
+          providerThreadId: providerThread.id,
+          runOrdinal: run.ordinal,
+          inheritedBackgroundTurnItems,
+        });
+        const subagents = projection.subagents.filter((subagent) => subagent.runId === run.id);
+        const relatedThreadIds = subagents.flatMap((subagent) =>
+          subagent.childThreadId === null ? [] : [subagent.childThreadId],
+        );
+        const relatedProviderThreadIds = subagents.flatMap((subagent) =>
+          subagent.providerThreadId === null ? [] : [subagent.providerThreadId],
+        );
+        const ownedProviderThreads = new Set([providerThread.id, ...relatedProviderThreadIds]);
+        const inheritedItemIds = new Set(inheritedBackgroundTurnItems.map((item) => item.id));
+        const lifecycleEvents: Array<ProviderAdapter.ProviderAdapterV2Event> = [
+          ...subagents.map((subagent) => ({
+            type: "subagent.updated" as const,
+            driver: input.session.driver,
+            subagent,
+          })),
+          ...projection.providerThreads
+            .filter((thread) => ownedProviderThreads.has(thread.id))
+            .map((providerThread) => ({
+              type: "provider_thread.updated" as const,
+              driver: input.session.driver,
+              providerThread,
+            })),
+          ...projection.providerTurns
+            .filter(
+              (turn) =>
+                turn.runAttemptId === attempt.id ||
+                relatedProviderThreadIds.includes(turn.providerThreadId),
+            )
+            .map((providerTurn) => ({
+              type: "provider_turn.updated" as const,
+              driver: input.session.driver,
+              providerTurn,
+            })),
+          ...projection.nodes
+            .filter((node) => node.runId === run.id || relatedThreadIds.includes(node.threadId))
+            .map((node) => ({
+              type: "node.updated" as const,
+              driver: input.session.driver,
+              node,
+            })),
+          ...projection.turnItems
+            .filter(
+              (item) =>
+                item.runId === run.id ||
+                inheritedItemIds.has(item.id) ||
+                relatedThreadIds.includes(item.threadId),
+            )
+            .map((turnItem) => ({
+              type: "turn_item.updated" as const,
+              driver: input.session.driver,
+              turnItem,
+            })),
+        ];
+        yield* runExecution.startRootRun({
+          commandId: CommandId.make(`command:provider-adopt:${run.id}:${attempt.id}`),
+          appThread: projection.thread,
+          providerSessionId: input.session.providerSessionId,
+          session: input.session,
+          run,
+          rootNode,
+          checkpointScope,
+          providerThread,
+          attempt,
+          attemptId: attempt.id,
+          providerTurnOrdinal: Math.max(
+            1,
+            ...projection.providerTurns
+              .filter((turn) => turn.runAttemptId === attempt.id)
+              .map((turn) => turn.ordinal),
+          ),
+          adoptExistingTurn: { lifecycleEvents },
+          loadInheritedBackgroundTurnItems: controls.loadInheritedBackgroundTurnItems,
+          relatedThreadIds,
+          relatedProviderThreadIds,
+          shouldFinalizeRun: controls.shouldFinalizeRun,
+          hasUnpairedRunInterruptRequest: controls.hasUnpairedRunInterruptRequest,
+          loadRunInterruptReason: controls.loadRunInterruptReason,
+          message: {
+            messageId: message.id,
+            text: message.text,
+            attachments: message.attachments,
+            createdBy: message.createdBy,
+            creationSource: message.creationSource,
+            ...(message.scheduledTaskId === undefined
+              ? {}
+              : { scheduledTaskId: message.scheduledTaskId }),
+          },
+          modelSelection: run.modelSelection,
+          runtimePolicy: yield* runtimePolicy.resolve({
+            thread: projection.thread,
+            modelSelection: run.modelSelection,
+          }),
+        });
+      },
+      (effect, input) =>
+        effect.pipe(
+          Effect.mapError((cause) =>
+            isProviderTurnStartError(cause)
+              ? cause
+              : new ProviderTurnStartError({ runId: input.runId, cause }),
+          ),
+        ),
+    );
+
     return ProviderTurnStartServiceV2.of({
+      adopt,
       start: Effect.fn("ProviderTurnStartService.start")(
         function* (input) {
           // Storage cleanup removes worktrees under the same lease. Only startup

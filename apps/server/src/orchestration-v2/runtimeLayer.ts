@@ -2,6 +2,11 @@ import * as GuestShareService from "../guest/GuestShareService.ts";
 import * as UsageLimitRecoveryWorker from "./UsageLimitRecoveryWorker.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as Layer from "effect/Layer";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import * as ProviderSessionAdoption from "../provider/ProviderSessionAdoption.ts";
+import * as ProviderSessionTransport from "../provider/ProviderSessionTransport.ts";
+import * as RetainedProviderWork from "./RetainedProviderWork.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as OrchestrationCommandReceipts from "../persistence/OrchestrationCommandReceipts.ts";
 import * as OrchestrationEventStore from "../persistence/OrchestrationEventStore.ts";
@@ -367,7 +372,28 @@ export const layer = Layer.mergeAll(
   layerLegacyV1ThreadImporterProvided,
 );
 
+const layerSessionAdoptionProvided = Layer.unwrap(
+  Effect.map(Effect.serviceOption(ProviderSessionTransport.ProviderSessionClient), (client) =>
+    Option.isSome(client)
+      ? ProviderSessionAdoption.layer.pipe(
+          Layer.provide(
+            Layer.succeed(ProviderSessionTransport.ProviderSessionClient, client.value),
+          ),
+          Layer.provide(
+            Layer.mergeAll(
+              layerProviderSessionManagerProvided,
+              layerProviderTurnStartServiceProvided,
+              ProjectionStore.layer,
+            ),
+          ),
+          Layer.provide(layerProjectService),
+        )
+      : Layer.empty,
+  ),
+);
+
 export const layerProduction = Layer.mergeAll(
+  layerSessionAdoptionProvided,
   layer.pipe(Layer.provide(layerProjectService)),
   layerProjectService,
   layerManagedProjectFoldersProvided,
@@ -391,6 +417,7 @@ export const layerProduction = Layer.mergeAll(
   layerAgentSessionImporterProvided,
   EffectOutbox.layerPruneWorker.pipe(Layer.provide(EffectOutbox.layer)),
 ).pipe(
+  Layer.provideMerge(RetainedProviderWork.layer),
   Layer.provide(ResourceCleanupService.layer.pipe(Layer.provide(layerScheduledTaskProvided))),
   Layer.provide(Scheduler.layer),
   Layer.provideMerge(layerEventInfrastructure),

@@ -24,6 +24,7 @@ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderRuntimeRecovery from "./ProviderRuntimeRecoveryService.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as RetainedProviderWork from "./RetainedProviderWork.ts";
 
 it.effect("expires orphaned runtime requests before command readiness", () => {
   const threadId = ThreadId.make("thread_recovery_requests");
@@ -609,9 +610,14 @@ it.effect.each(["queued", "preparing"] as const)("recovers $0 work after restart
   }).pipe(Effect.provide(layer));
 });
 
-it.effect(
-  "cancels the complete in-flight subtree and stops its persisted session without reopening it",
-  () => {
+it.effect.each([
+  { retained: false, phase: "startup" },
+  { retained: true, phase: "startup" },
+  { retained: false, phase: "shutdown" },
+  { retained: true, phase: "shutdown" },
+] as const)(
+  "reconciles in-flight work without reopening it: $phase, retained=$retained",
+  ({ retained, phase }) => {
     const threadId = ThreadId.make("thread_recovery_cancel");
     const runId = RunId.make("run_recovery_cancel");
     const attemptId = RunAttemptId.make("attempt_recovery_cancel");
@@ -635,6 +641,7 @@ it.effect(
       providerThreads: [
         {
           id: providerThreadId,
+          providerSessionId,
           driver: ProviderDriverKind.make("codex"),
           providerInstanceId: ProviderInstanceId.make("codex"),
           status: "active",
@@ -643,6 +650,7 @@ it.effect(
       providerTurns: [
         {
           id: providerTurnId,
+          providerThreadId,
           runAttemptId: attemptId,
           nodeId: rootNodeId,
           status: "running",
@@ -652,6 +660,7 @@ it.effect(
         {
           id: runId,
           status: "starting",
+          activeAttemptId: attemptId,
           providerThreadId,
           providerInstanceId: ProviderInstanceId.make("codex"),
         },
@@ -659,14 +668,22 @@ it.effect(
       attempts: [
         {
           id: attemptId,
+          providerThreadId,
           runId,
           rootNodeId,
           status: "running",
         },
       ],
-      nodes: [{ id: rootNodeId, runId, status: "running" }],
+      nodes: [{ id: rootNodeId, rootNodeId, providerThreadId, runId, status: "running" }],
       subagents: [],
-      messages: [{ id: MessageId.make("message_recovery_cancel"), runId, streaming: true }],
+      messages: [
+        {
+          id: MessageId.make("message_recovery_cancel"),
+          nodeId: rootNodeId,
+          runId,
+          streaming: true,
+        },
+      ],
       turnItems: [
         {
           id: TurnItemId.make("turn_item_recovery_cancel"),
@@ -678,6 +695,16 @@ it.effect(
     } as unknown as OrchestrationV2ThreadProjection;
     const layer = ProviderRuntimeRecovery.layer.pipe(
       Layer.provide(ServerSettings.layerTest()),
+      Layer.provide(
+        Layer.succeed(RetainedProviderWork.RetainedProviderWork, {
+          read: Effect.succeed(
+            retained
+              ? { sessionIds: [providerSessionId], attemptIds: [attemptId] }
+              : RetainedProviderWork.empty,
+          ),
+          replace: () => Effect.void,
+        }),
+      ),
       Layer.provide(
         Layer.mergeAll(
           Layer.mock(ProjectionStore.ProjectionStoreV2)({
@@ -696,14 +723,25 @@ it.effect(
           }),
           Layer.mock(EffectOutbox.EffectOutboxV2)({
             reconcileAfterProcessLoss: Effect.succeed({ requeued: 0, cancelled: 0 }),
+            cancelUnsettled: (input) => {
+              assert.isTrue(input.preserveRetained);
+              return Effect.succeed([]);
+            },
+            signalCancellations: () => Effect.void,
           }),
         ),
       ),
     );
 
     return Effect.gen(function* () {
-      const summary = yield* (yield* ProviderRuntimeRecovery.ProviderRuntimeRecoveryService)
-        .recover;
+      const summary =
+        yield* (yield* ProviderRuntimeRecovery.ProviderRuntimeRecoveryService).reconcile(phase);
+      if (retained) {
+        assert.equal(summary.terminalizedRuns, 0);
+        assert.equal(summary.stoppedSessions, 0);
+        assert.isNull(committedInput);
+        return;
+      }
       assert.equal(summary.terminalizedRuns, 1);
       assert.equal(summary.stoppedSessions, 1);
       assert.equal(summary.retiredEffects, 2);

@@ -1,5 +1,10 @@
 export const BACKEND_DAEMON_PROTOCOL = 1;
 export type BackendDaemonRole = "host" | "backend";
+export interface BackendDaemonStatus {
+  readonly state: "stopped" | "starting" | "running" | "reloading" | "degraded";
+  readonly hostPid?: number | undefined;
+  readonly backendPid?: number | undefined;
+}
 export interface BackendDaemonReadyMessage {
   readonly type: "t3-daemon-ready";
   readonly protocol: typeof BACKEND_DAEMON_PROTOCOL;

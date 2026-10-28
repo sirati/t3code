@@ -12,12 +12,7 @@ let
     types
     mkIf
     ;
-  args = [
-    "serve"
-    "--base-dir"
-    cfg.stateDirectory
-  ]
-  ++ cfg.extraArgs;
+  daemon = import ./daemon-service.nix { inherit lib pkgs cfg; };
   escapeExec = value: lib.replaceStrings [ "%" "$" ] [ "%%" "$$" ] (builtins.toJSON value);
   escapeEnvironment = value: lib.replaceStrings [ "%" ] [ "%%" ] (builtins.toJSON value);
   env = cfg.environment // {
@@ -27,6 +22,11 @@ in
 {
   options.services.t3code = {
     enable = mkEnableOption "the T3 Code headless server";
+    seamlessReload = mkOption {
+      type = types.bool;
+      default = true;
+      description = "Retain provider processes while replacing the backend on service reload. Environment or listener changes require a full restart.";
+    };
     package = mkOption {
       type = types.package;
       default = pkgs.t3code;
@@ -53,7 +53,7 @@ in
     extraArgs = mkOption {
       type = types.listOf types.str;
       default = [ ];
-      description = "Additional arguments appended to `t3 serve`.";
+      description = "Additional arguments appended to the headless backend command.";
     };
     environment = mkOption {
       type = types.attrsOf types.str;
@@ -88,8 +88,12 @@ in
       wantedBy = [ "multi-user.target" ];
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
+      reloadIfChanged = cfg.seamlessReload;
       serviceConfig = {
-        ExecStart = lib.concatMapStringsSep " " escapeExec ([ "${cfg.package}/bin/t3" ] ++ args);
+        ExecStart = lib.concatMapStringsSep " " escapeExec ([ "${cfg.package}/bin/t3" ] ++ daemon.args);
+        KillMode = "mixed";
+        TimeoutStartSec = "35min";
+        TimeoutStopSec = "90s";
         User = cfg.user;
         WorkingDirectory = lib.replaceStrings [ "%" ] [ "%%" ] cfg.workingDirectory;
         StateDirectory = lib.mkIf (cfg.stateDirectory == "/var/lib/t3code") "t3code";
@@ -97,6 +101,10 @@ in
         EnvironmentFile = map escapeEnvironment cfg.environmentFiles;
         Restart = "on-failure";
         RestartSec = 5;
+      }
+      // lib.optionalAttrs cfg.seamlessReload {
+        ExecStartPre = [ (escapeExec "${daemon.prepare}") ];
+        ExecReload = escapeExec "${daemon.reload}";
       }
       // lib.optionalAttrs (cfg.group != null) { Group = cfg.group; };
     };

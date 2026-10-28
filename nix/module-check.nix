@@ -66,6 +66,12 @@ let
   };
   disabledSystem = systemConfig { };
   disabledHome = homeConfig { };
+  conventionalHome = homeConfig {
+    services.t3code = {
+      enable = true;
+      seamlessReload = false;
+    };
+  };
   invalidUid = systemConfig {
     users.users.alias = {
       isSystemUser = true;
@@ -89,12 +95,41 @@ let
       user = "root";
     };
   };
+  fixtureHome = "./t3 daemon 'quoted' $literal %h";
+  fixturePackage =
+    version:
+    pkgs.writeShellScriptBin "t3" ''
+      printf '%s\n' ${lib.escapeShellArg version} "$@" > "$T3_TEST_OUTPUT"
+    '';
+  oldPackage = fixturePackage "old";
+  newPackage = fixturePackage "new";
+  fixtureDaemon =
+    package:
+    import ./daemon-service.nix {
+      inherit lib pkgs;
+      cfg = {
+        inherit package;
+        stateDirectory = fixtureHome;
+        seamlessReload = true;
+        extraArgs = [ ];
+      };
+    };
+  oldDaemon = fixtureDaemon oldPackage;
+  newDaemon = fixtureDaemon newPackage;
 in
 assert !(disabledSystem.systemd.services ? t3code);
 assert !(disabledHome.systemd.user.services ? t3code);
 assert system.systemd.services.t3code.serviceConfig.User == "alice";
 assert !(system.systemd.services.t3code.serviceConfig ? Group);
 assert system.systemd.services.t3code.serviceConfig.WorkingDirectory == "/srv/t3 state";
+assert system.systemd.services.t3code.reloadIfChanged;
+assert system.systemd.services.t3code.serviceConfig.KillMode == "mixed";
+assert system.systemd.services.t3code.serviceConfig ? ExecReload;
+assert lib.hasInfix ''"daemon" "run"'' system.systemd.services.t3code.serviceConfig.ExecStart;
+assert home.systemd.user.services.t3code.Unit.X-SwitchMethod == "reload";
+assert home.systemd.user.services.t3code.Service ? ExecReload;
+assert lib.hasInfix ''"serve"'' conventionalHome.systemd.user.services.t3code.Service.ExecStart;
+assert !(conventionalHome.systemd.user.services.t3code.Service ? ExecReload);
 assert lib.hasInfix (builtins.toJSON "space \"quote\" \\ $$VAR %%h")
   system.systemd.services.t3code.serviceConfig.ExecStart;
 assert builtins.elem (builtins.toJSON "EXAMPLE=space \"quote\" \\ $VAR %%h")
@@ -109,4 +144,13 @@ assert
 assert !(lib.all (x: x.assertion) invalidUid.assertions);
 assert !(lib.all (x: x.assertion) invalidNumeric.assertions);
 assert !(lib.all (x: x.assertion) invalid.assertions);
-pkgs.runCommand "t3code-module-evaluation" { } "touch $out"
+pkgs.runCommand "t3code-module-evaluation" { nativeBuildInputs = [ pkgs.diffutils ]; } ''
+  export T3_TEST_OUTPUT="$TMPDIR/daemon-call"
+  ${oldDaemon.prepare}
+  test "$(readlink ${lib.escapeShellArg "${fixtureHome}/runtime/daemon-entry"})" = ${lib.escapeShellArg "${oldPackage}/bin/t3"}
+  ${newDaemon.reload}
+  test "$(readlink ${lib.escapeShellArg "${fixtureHome}/runtime/daemon-entry"})" = ${lib.escapeShellArg "${newPackage}/bin/t3"}
+  printf '%s\n' new daemon reload --base-dir ${lib.escapeShellArg fixtureHome} > expected
+  diff -u expected "$T3_TEST_OUTPUT"
+  touch "$out"
+''

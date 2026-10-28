@@ -5,7 +5,9 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeNet from "node:net";
 import * as NodePath from "node:path";
+import * as NodeOS from "node:os";
 import { BackendDaemonSupervisor, type DaemonCommand } from "./backendDaemonSupervisor.ts";
+import { CONTROL_FILE, requestBackendDaemon } from "./backendDaemonControl.ts";
 
 const fixture = String.raw`
 const fs = require('node:fs');
@@ -170,6 +172,76 @@ it.live("stops the host when shutdown overlaps backend resolution", () =>
       } finally {
         gate.resolve(command("backend", "unused"));
         await supervisor.stop();
+      }
+    }),
+  ),
+);
+
+it.live("authenticates reloads and rejects a second supervisor for the same home", () =>
+  Effect.flatMap(HostProcess.Platform, (platform) =>
+    Effect.promise(async () => {
+      const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-control-test-"));
+      let descriptor = "";
+      let duplicateStarted = false;
+      const first = new BackendDaemonSupervisor({
+        platform,
+        stateDirectory: directory,
+        hostCommand: async (file) => {
+          descriptor = file;
+          return command("host", file);
+        },
+        backendCommand: async (file) => command("backend", file),
+        onError: () => {},
+      });
+      const duplicate = new BackendDaemonSupervisor({
+        platform,
+        stateDirectory: directory,
+        hostCommand: async (file) => {
+          duplicateStarted = true;
+          return command("host", file);
+        },
+        backendCommand: async (file) => command("backend", file),
+        onError: () => {},
+      });
+      try {
+        await first.start();
+        const filename = NodePath.join(directory, CONTROL_FILE);
+        const transport = JSON.parse(await NodeFSP.readFile(filename, "utf8")) as {
+          endpoint: string;
+          token: string;
+        };
+        if (platform !== "win32") assert.equal((await NodeFSP.stat(filename)).mode & 0o777, 0o600);
+        const original = await requestBackendDaemon(transport, "status");
+        const worker = JSON.parse(await NodeFSP.readFile(`${descriptor}.worker`, "utf8")) as {
+          port: number;
+        };
+        const before = await advanceWorker(worker.port);
+        await requestBackendDaemon({ ...transport, token: "wrong" }, "reload").then(
+          () => assert.fail("An unauthenticated reload must fail."),
+          (cause: unknown) => {
+            assert.instanceOf(cause, Error);
+            if (cause instanceof Error) assert.equal(cause.message, "Unauthorized.");
+          },
+        );
+        assert.deepEqual(await requestBackendDaemon(transport, "status"), original);
+        const replaced = await requestBackendDaemon(transport, "reload");
+        assert.equal(replaced.hostPid, original.hostPid);
+        assert.notEqual(replaced.backendPid, original.backendPid);
+        assert.deepEqual(await advanceWorker(worker.port), { ...before, steps: 2 });
+        await duplicate.start().then(
+          () => assert.fail("A second supervisor must not acquire the home."),
+          (cause: unknown) => {
+            assert.instanceOf(cause, Error);
+            if (cause instanceof Error)
+              assert.match(cause.message, /Another backend daemon supervisor owns/);
+          },
+        );
+        assert.isFalse(duplicateStarted);
+        assert.deepEqual(await requestBackendDaemon(transport, "status"), replaced);
+      } finally {
+        await duplicate.stop();
+        await first.stop();
+        await NodeFSP.rm(directory, { recursive: true, force: true });
       }
     }),
   ),

@@ -40,6 +40,42 @@ downloaded versions after showing you the list and asking once. Your projects,
 threads, and settings under `~/.t3/userdata` are kept, along with `service.env`
 under T3 home. Pass `--yes` from a script.
 
+## Reload only the backend
+
+For a backend host that must keep agent turns running during reload, start it
+under the daemon supervisor:
+
+```sh
+t3 daemon run --base-dir ~/.t3 --tailscale-serve
+```
+
+From another terminal on the same host:
+
+```sh
+t3 daemon status --base-dir ~/.t3
+t3 daemon reload --base-dir ~/.t3
+```
+
+Reload replaces the backend while retaining its provider processes and active
+turns. Connected clients reconnect and restore their subscriptions; their app
+windows and frontend stay running. The reload command waits for the replacement
+to accept commands. If startup fails, the supervisor tries the previous backend.
+If both fail, the provider host remains running; repair the executable and run
+reload again.
+
+Use `--backend-command /absolute/path/to/t3` with `daemon run` to select an
+executable again on each reload, such as a Nix profile path. For rollback, that
+path must resolve to an immutable executable, as Nix store paths do. Changing
+environment variables, the listener, or daemon arguments requires a full restart.
+Stopping the supervisor also stops its providers.
+
+The NixOS and Home Manager `services.t3code` modules enable this mode by default.
+Use `systemctl reload t3code` for a system service or
+`systemctl --user reload t3code` for a user service. Package updates select the
+new package before reloading. Set `services.t3code.seamlessReload = false` to use
+a conventional server process instead. Moving an existing unsupervised server
+to this mode requires stopping it once first.
+
 ## Local network access
 
 The service listens on your local network and Tailscale addresses, so the

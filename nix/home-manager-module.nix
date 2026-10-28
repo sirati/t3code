@@ -12,12 +12,7 @@ let
     types
     mkIf
     ;
-  args = [
-    "serve"
-    "--base-dir"
-    cfg.stateDirectory
-  ]
-  ++ cfg.extraArgs;
+  daemon = import ./daemon-service.nix { inherit lib pkgs cfg; };
   escapeExec = value: lib.replaceStrings [ "%" "$" ] [ "%%" "$$" ] (builtins.toJSON value);
   escapeEnvironment = value: lib.replaceStrings [ "%" ] [ "%%" ] (builtins.toJSON value);
   env = cfg.environment // {
@@ -27,6 +22,11 @@ in
 {
   options.services.t3code = {
     enable = mkEnableOption "the T3 Code headless server";
+    seamlessReload = mkOption {
+      type = types.bool;
+      default = true;
+      description = "Retain provider processes while replacing the backend on service reload. Environment or listener changes require a full restart.";
+    };
     package = mkOption {
       type = types.package;
       default = pkgs.t3code;
@@ -64,15 +64,23 @@ in
         Description = "T3 Code server";
         After = [ "network-online.target" ];
         Wants = [ "network-online.target" ];
-      };
+      }
+      // lib.optionalAttrs cfg.seamlessReload { X-SwitchMethod = "reload"; };
       Install.WantedBy = [ "default.target" ];
       Service = {
-        ExecStart = lib.concatMapStringsSep " " escapeExec ([ "${cfg.package}/bin/t3" ] ++ args);
+        ExecStart = lib.concatMapStringsSep " " escapeExec ([ "${cfg.package}/bin/t3" ] ++ daemon.args);
+        KillMode = "mixed";
+        TimeoutStartSec = "35min";
+        TimeoutStopSec = "90s";
         WorkingDirectory = lib.replaceStrings [ "%" ] [ "%%" ] cfg.workingDirectory;
         Restart = "on-failure";
         RestartSec = 5;
         Environment = lib.mapAttrsToList (name: value: escapeEnvironment "${name}=${value}") env;
         EnvironmentFile = map escapeEnvironment cfg.environmentFiles;
+      }
+      // lib.optionalAttrs cfg.seamlessReload {
+        ExecStartPre = [ (escapeExec "${daemon.prepare}") ];
+        ExecReload = escapeExec "${daemon.reload}";
       };
     };
   };

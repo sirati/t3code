@@ -999,7 +999,13 @@ export const layer: Layer.Layer<
           attemptId: input.attempt.id,
           providerThreadId: input.providerThread.id,
         };
-        const eventSubscription =
+        const receiptFor = (event: ProviderAdapter.ProviderAdapterV2Event, operation: string) => {
+          const delivery = input.session.eventDelivery?.receiptFor(event);
+          return delivery === undefined
+            ? undefined
+            : { ...delivery, consumer: `run:${input.run.id}`, operation };
+        };
+        const eventSubscription: ProviderAdapter.ProviderAdapterV2EventSubscription =
           input.session.subscribeEvents === undefined
             ? { events: input.session.events, close: Effect.void }
             : yield* input.session.subscribeEvents;
@@ -1311,6 +1317,12 @@ export const layer: Layer.Layer<
         const providerEventFiber = yield* eventSubscription.events.pipe(
           Stream.mapEffect((event) =>
             Effect.gen(function* () {
+              const processedReceipt = receiptFor(event, "consumer-complete");
+              if (
+                processedReceipt !== undefined &&
+                (yield* eventSink.readProviderReceipt(processedReceipt)) !== undefined
+              )
+                return { event, accepted: false };
               const previous = yield* Ref.get(eventRouting);
               const [accepted, routing] = routeProviderEvent(event, routeIdentity, previous);
               yield* Ref.set(eventRouting, routing);
@@ -1421,6 +1433,9 @@ export const layer: Layer.Layer<
                   runId: input.run.id,
                   nodeId: input.rootNode.id,
                   event: deliveredEvent,
+                  ...(receiptFor(event, "event") === undefined
+                    ? {}
+                    : { providerReceipt: receiptFor(event, "event")! }),
                   ...(isRootProviderThreadUpdate
                     ? rootTerminalAlreadySeen
                       ? {
@@ -1484,9 +1499,13 @@ export const layer: Layer.Layer<
             }),
           ),
           // Also after events this run does not accept, such as a child handed to another run.
-          Stream.tap(() =>
+          Stream.tap(({ event }) =>
             Effect.gen(function* () {
               if (yield* agentTurnsSettled) yield* endPreviewActivity;
+              const providerReceipt = receiptFor(event, "consumer-complete");
+              if (providerReceipt !== undefined)
+                yield* eventSink.write({ events: [], providerReceipt });
+              yield* eventSubscription.acknowledge?.(event) ?? Effect.void;
             }),
           ),
           Stream.takeUntilEffect(() => shouldStopProviderEventIngestion),

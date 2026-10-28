@@ -302,12 +302,12 @@ it.live(
               modelWindow: null,
             },
           );
-          const pending = Option.getOrThrow(
-            yield* client["session.events"]({ sessionId, lease: attached.lease, after: 0 }).pipe(
-              Stream.runHead,
-            ),
-          );
+          const pending = Option.getOrThrow(yield* remote.envelopes.pipe(Stream.runHead));
           assert.deepEqual(pending.event, event);
+          assert.deepEqual(remote.runtime.eventDelivery!.receiptFor(pending.event), {
+            incarnation: attached.incarnation,
+            sequence: pending.sequence,
+          });
           const policy = yield* client["session.invoke"]({
             sessionId,
             lease: attached.lease,

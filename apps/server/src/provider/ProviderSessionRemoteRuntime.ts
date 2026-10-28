@@ -1,4 +1,6 @@
-import type { ProviderSessionId } from "@t3tools/contracts";
+import { ThreadId, type ProviderSessionId } from "@t3tools/contracts";
+import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
+import * as Option from "effect/Option";
 import * as Adapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
@@ -8,6 +10,14 @@ import type { HostedProviderSession } from "./ProviderSessionHost.ts";
 import { sessionMethods } from "./ProviderSessionMethods.ts";
 import * as ProviderSessionTransport from "./ProviderSessionTransport.ts";
 
+const decodeThreadReferences = Schema.decodeUnknownEffect(
+  Schema.Struct({
+    threadId: Schema.optionalKey(ThreadId),
+    targetThreadId: Schema.optionalKey(ThreadId),
+    providerThread: Schema.optionalKey(Schema.Struct({ appThreadId: ThreadId })),
+  }),
+);
+
 const isAdapterError = Schema.is(Adapter.ProviderAdapterV2Error);
 
 export const connect = Effect.fn("ProviderSessionRemoteRuntime.connect")(function* (
@@ -15,6 +25,7 @@ export const connect = Effect.fn("ProviderSessionRemoteRuntime.connect")(functio
   options: { readonly startPaused?: boolean } = {},
 ) {
   const client = yield* ProviderSessionTransport.ProviderSessionClient;
+  const mcpSessions = yield* Effect.serviceOption(McpProviderSessions.McpProviderSessions);
   const sessionId: ProviderSessionId = descriptor.providerSession.id;
   const owned = { sessionId, lease: descriptor.lease };
   const driver = descriptor.providerSession.driver;
@@ -38,16 +49,41 @@ export const connect = Effect.fn("ProviderSessionRemoteRuntime.connect")(functio
     const decode = Schema.decodeUnknownEffect(definition.output);
     return Effect.fn(`ProviderSessionRemoteRuntime.${name}`)(function* (argument: I) {
       const encoded = yield* encode(argument);
+      const references = yield* decodeThreadReferences(encoded);
+      const threadIds = new Set(
+        [
+          references.threadId,
+          references.targetThreadId,
+          references.providerThread?.appThreadId,
+        ].filter((id) => id !== undefined),
+      );
+      const configs = Option.isNone(mcpSessions)
+        ? []
+        : yield* Effect.forEach(threadIds, (id) => mcpSessions.value.read(id));
+      const mcp = configs.flatMap((config) =>
+        config === undefined
+          ? []
+          : [
+              {
+                ...config,
+                capabilities: [...(config.capabilities ?? [])],
+              },
+            ],
+      );
       const response = yield* client["session.invoke"]({
         ...owned,
         method: name,
         argument: encoded,
+        ...(mcp.length === 0 ? {} : { mcp }),
       });
       return yield* decode(response);
     }, Effect.mapError(failure));
   };
   const deliveryStarted = yield* Deferred.make<void>();
   if (!options.startPaused) yield* Deferred.succeed(deliveryStarted, undefined);
+  const caughtUp = yield* Deferred.make<void>();
+  if (descriptor.acknowledgedThrough >= descriptor.journalHead)
+    yield* Deferred.succeed(caughtUp, undefined);
   const receipts = new WeakMap<
     Adapter.ProviderAdapterV2Event,
     { incarnation: string; sequence: number }
@@ -63,7 +99,12 @@ export const connect = Effect.fn("ProviderSessionRemoteRuntime.connect")(functio
     Stream.mapError(failure),
   );
   const acknowledge = (through: number) =>
-    client["session.acknowledge"]({ ...owned, through }).pipe(Effect.mapError(failure));
+    client["session.acknowledge"]({ ...owned, through }).pipe(
+      Effect.tap(() =>
+        through >= descriptor.journalHead ? Deferred.succeed(caughtUp, undefined) : Effect.void,
+      ),
+      Effect.mapError(failure),
+    );
   const has = (method: string) => descriptor.methods.includes(method);
   // A transport outage must not make idle cleanup discard live provider work.
   const retainOnProbeFailure = <E>(probe: Effect.Effect<boolean, E>) =>
@@ -87,6 +128,7 @@ export const connect = Effect.fn("ProviderSessionRemoteRuntime.connect")(functio
       receiptFor: (event) => receipts.get(event),
       acknowledge,
       resume: Deferred.succeed(deliveryStarted, undefined).pipe(Effect.asVoid),
+      awaitCaughtUp: Deferred.await(caughtUp),
     },
     ensureThread: bind("ensureThread", sessionMethods.ensureThread),
     resumeThread: bind("resumeThread", sessionMethods.resumeThread),

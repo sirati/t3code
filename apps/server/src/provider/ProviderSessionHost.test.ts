@@ -39,6 +39,8 @@ import * as ProviderMcpIngress from "./ProviderMcpIngress.ts";
 import * as ProviderSessionJournal from "./ProviderSessionJournal.ts";
 import * as ProviderSessionTransport from "./ProviderSessionTransport.ts";
 import * as ProviderSessionRemoteRuntime from "./ProviderSessionRemoteRuntime.ts";
+import * as HostedProviderSessionBackend from "./HostedProviderSessionBackend.ts";
+import * as ProviderSessionBackend from "./ProviderSessionBackend.ts";
 
 const eventJson = Schema.fromJsonString(Schema.toCodecJson(ProviderAdapter.ProviderAdapterV2Event));
 const encodeEvent = Schema.encodeSync(eventJson);
@@ -269,6 +271,18 @@ it.live(
           const entries = yield* client["session.list"]({});
           assert.deepEqual(entries[0]!.providerSession.createdAt, now);
           const attached = yield* client["session.attach"]({ sessionId, lease: second.lease });
+          const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
+          const mcpConfig = {
+            environmentId: EnvironmentId.make("fixture"),
+            threadId: input.threadId,
+            providerSessionId: sessionId,
+            providerInstanceId: instanceId,
+            endpoint: "http://127.0.0.1:1/mcp",
+            authorizationHeader: "Bearer retained-native-token",
+            browserToolsAvailable: true,
+            capabilities: new Set(["orchestration"]),
+          };
+          yield* mcpSessions.set(mcpConfig);
           const remote = yield* ProviderSessionRemoteRuntime.connect(attached);
           assert.isUndefined(remote.runtime.compactThread);
           yield* remote.runtime.unloadThread!({
@@ -291,6 +305,14 @@ it.live(
             }),
           });
           assert.equal(unloaded, 1);
+          const hostMcp = yield* client["mcp.configurations"]({});
+          assert.deepEqual(hostMcp, [
+            {
+              ...mcpConfig,
+              endpoint: ingressStatus.endpoint,
+              capabilities: ["orchestration"],
+            },
+          ]);
           assert.deepEqual(
             yield* remote.readContextPolicy({
               previous: null,
@@ -320,7 +342,7 @@ it.live(
           yield* Deferred.await(probeStarted);
           yield* remote.detach;
           return attached;
-        }).pipe(Effect.provide(clientLayer));
+        }).pipe(Effect.provide(Layer.merge(clientLayer, McpProviderSessions.layer)));
         assert.equal(closed, 0);
         yield* emit(event);
         yield* Effect.gen(function* () {
@@ -328,6 +350,16 @@ it.live(
           assert.deepEqual(yield* client["mcp.credentials"]({}), credentials);
           const current = (yield* client["session.list"]({}))[0]!;
           const attached = yield* client["session.attach"]({ sessionId, lease: current.lease });
+          assert.equal(attached.acknowledgedThrough, received.sequence);
+          const remote = yield* ProviderSessionRemoteRuntime.connect(attached, {
+            startPaused: true,
+          });
+          const caughtUp = yield* Deferred.make<void>();
+          yield* remote.runtime.eventDelivery!.awaitCaughtUp!.pipe(
+            Effect.andThen(Deferred.succeed(caughtUp, undefined)),
+            Effect.forkChild,
+          );
+          assert.isFalse(yield* Deferred.isDone(caughtUp));
           yield* Deferred.succeed(probeFinish, undefined);
           yield* Deferred.await(probeCompleted);
           const buffered = yield* client["session.events"]({
@@ -339,11 +371,17 @@ it.live(
             buffered.map((entry) => entry.sequence),
             [received.sequence + 1, received.sequence + 2],
           );
-          yield* client["session.acknowledge"]({
-            sessionId,
-            lease: attached.lease,
-            through: received.sequence + 2,
-          });
+          assert.equal(
+            (yield* remote.acknowledge(attached.journalHead + 100).pipe(Effect.result))._tag,
+            "Failure",
+          );
+          assert.isFalse(yield* Deferred.isDone(caughtUp));
+          yield* remote.acknowledge(received.sequence + 2);
+          yield* Deferred.await(caughtUp);
+          assert.equal(
+            (yield* client["session.list"]({}))[0]!.acknowledgedThrough,
+            received.sequence + 2,
+          );
           const rejected = yield* client["session.close"]({
             sessionId,
             lease: firstConnection.lease,
@@ -387,7 +425,32 @@ it.live(
           "Failure",
         );
         assert.equal(harness!.exitCode, null);
-        yield* host.close(sessionId, reattached.lease);
+        yield* host.detach(sessionId, reattached.lease);
+        const backendLayer = HostedProviderSessionBackend.layer.pipe(
+          Layer.provide(clientLayer),
+          Layer.provide(McpProviderSessions.layer),
+        );
+        const beforeDetach = (yield* host.list)[0]!;
+        yield* Effect.gen(function* () {
+          const backend = yield* ProviderSessionBackend.ProviderSessionBackend;
+          const retained = yield* backend.open!({ driver, instanceId, input });
+          assert.isTrue(backend.retains(retained));
+          assert.equal(opened, 3);
+          assert.equal(closed, 2);
+          assert.equal(retained.providerSessionId, sessionId);
+        }).pipe(Effect.provide(backendLayer), Effect.scoped);
+        assert.equal(closed, 2);
+        const afterDetach = (yield* host.list)[0]!;
+        assert.equal(afterDetach.incarnation, beforeDetach.incarnation);
+        assert.notEqual(afterDetach.lease, beforeDetach.lease);
+        yield* Effect.gen(function* () {
+          const backend = yield* ProviderSessionBackend.ProviderSessionBackend;
+          const retained = yield* backend.open!({ driver, instanceId, input });
+          yield* backend.terminate(retained);
+          yield* backend.terminate(retained);
+          assert.equal(closed, 3);
+        }).pipe(Effect.provide(backendLayer), Effect.scoped);
+        assert.lengthOf(yield* host.list, 0);
       }).pipe(
         Effect.provide(
           ProviderSessionHost.layer.pipe(

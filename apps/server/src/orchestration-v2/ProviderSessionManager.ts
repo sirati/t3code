@@ -53,6 +53,7 @@ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
+import * as ProviderSessionBackend from "../provider/ProviderSessionBackend.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 
 const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
@@ -318,6 +319,7 @@ export const layerWithOptions = (
     ProviderSessionManagerV2,
     Effect.gen(function* () {
       const registry = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
+      const backend = yield* ProviderSessionBackend.ProviderSessionBackend;
       const fileSystem = yield* FileSystem.FileSystem;
       const mcpSessionRegistry = yield* McpSessionRegistry.McpSessionRegistry;
       const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
@@ -1012,6 +1014,15 @@ export const layerWithOptions = (
               onNone: () => Effect.void,
               onSome: (entry) =>
                 Effect.gen(function* () {
+                  if (input.reason === "server_shutdown" && backend.retains(entry.runtime)) {
+                    yield* cancelIdleFiber(entry.idleFiber);
+                    yield* interruptSubscribers(entry);
+                    yield* closeScopeWithin(entry.scope, {
+                      providerSessionId: input.providerSessionId,
+                      reason: input.reason,
+                    });
+                    return;
+                  }
                   const releasedBackgroundTasks = yield* readReleasedBackgroundTasks({
                     entry,
                     reason: input.reason,
@@ -1032,6 +1043,8 @@ export const layerWithOptions = (
                       input.detail ?? `Provider session released: ${input.reason}.`,
                     );
                   }
+                  if (input.reason === "manual_shutdown" || input.reason === "idle_timeout")
+                    yield* backend.terminate(entry.runtime);
                   const closeExit = yield* closeScopeWithin(entry.scope, {
                     providerSessionId: input.providerSessionId,
                     reason: input.reason,
@@ -1069,28 +1082,31 @@ export const layerWithOptions = (
               onNone: () => Effect.void,
               onSome: (entry) =>
                 // Revoke recorded credentials after process death, except those held by live replacements.
-                Ref.get(sessions).pipe(
-                  Effect.flatMap((current) =>
-                    Effect.forEach(
-                      entry.mcpCredentialIdByThread,
-                      ([threadId, mcpCredentialId]) => {
-                        // Only holders of this credential may prevent its revocation; stale credentials must not leak it.
-                        const heldElsewhere =
-                          isMcpCredentialReserved(threadId, mcpCredentialId) ||
-                          Array.from(current.values()).some(
-                            (other) =>
-                              other !== entry &&
-                              (other.attachedThreadIds.has(threadId) ||
-                                other.mcpCredentialIdByThread.get(threadId) === mcpCredentialId),
-                          );
-                        return heldElsewhere
-                          ? Effect.void
-                          : clearMcpSession(threadId, mcpCredentialId);
-                      },
-                      { discard: true },
+                input.reason === "server_shutdown" && backend.retains(entry.runtime)
+                  ? Effect.void
+                  : Ref.get(sessions).pipe(
+                      Effect.flatMap((current) =>
+                        Effect.forEach(
+                          entry.mcpCredentialIdByThread,
+                          ([threadId, mcpCredentialId]) => {
+                            // Only holders of this credential may prevent its revocation; stale credentials must not leak it.
+                            const heldElsewhere =
+                              isMcpCredentialReserved(threadId, mcpCredentialId) ||
+                              Array.from(current.values()).some(
+                                (other) =>
+                                  other !== entry &&
+                                  (other.attachedThreadIds.has(threadId) ||
+                                    other.mcpCredentialIdByThread.get(threadId) ===
+                                      mcpCredentialId),
+                              );
+                            return heldElsewhere
+                              ? Effect.void
+                              : clearMcpSession(threadId, mcpCredentialId);
+                          },
+                          { discard: true },
+                        ),
+                      ),
                     ),
-                  ),
-                ),
             }),
         ).pipe(
           Effect.catchCause((cause) =>
@@ -2201,56 +2217,62 @@ export const layerWithOptions = (
               });
               const sessionScope = yield* Scope.fork(sessionScopes);
               yield* agentScope.clear(input.threadId);
-              const runtime = yield* adapter
-                .openSession({
-                  threadId: input.threadId,
-                  providerSessionId: input.providerSessionId,
-                  modelSelection: input.modelSelection,
-                  runtimePolicy: input.runtimePolicy,
-                  ...(input.resumeFromSession === undefined
-                    ? {}
-                    : { resumeFromSession: input.resumeFromSession }),
-                  ...(input.initialNativeThreadId === undefined
-                    ? {}
-                    : { initialNativeThreadId: input.initialNativeThreadId }),
-                  ...(input.initialProviderItemIdentityVersion === undefined
-                    ? {}
-                    : {
-                        initialProviderItemIdentityVersion:
-                          input.initialProviderItemIdentityVersion,
+              const openInput = {
+                threadId: input.threadId,
+                providerSessionId: input.providerSessionId,
+                modelSelection: input.modelSelection,
+                runtimePolicy: input.runtimePolicy,
+                ...(input.resumeFromSession === undefined
+                  ? {}
+                  : { resumeFromSession: input.resumeFromSession }),
+                ...(input.initialNativeThreadId === undefined
+                  ? {}
+                  : { initialNativeThreadId: input.initialNativeThreadId }),
+                ...(input.initialProviderItemIdentityVersion === undefined
+                  ? {}
+                  : {
+                      initialProviderItemIdentityVersion: input.initialProviderItemIdentityVersion,
+                    }),
+              };
+              const runtime = yield* (
+                backend.open === undefined
+                  ? adapter.openSession(openInput)
+                  : backend.open({
+                      driver: adapter.driver,
+                      instanceId: adapter.instanceId,
+                      input: openInput,
+                    })
+              ).pipe(
+                Effect.provideService(Scope.Scope, sessionScope),
+                // Bound scope close after cleanup; a wedged finalizer must not hold the open lock or interrupter.
+                Effect.onError(() =>
+                  dropReservation.pipe(
+                    Effect.andThen(
+                      prepared.issued
+                        ? clearMcpSession(input.threadId, mcpCredentialId)
+                        : Effect.void,
+                    ),
+                    Effect.ensuring(
+                      closeScopeWithin(sessionScope, {
+                        providerSessionId: input.providerSessionId,
+                        reason: "open_failed",
                       }),
-                })
-                .pipe(
-                  Effect.provideService(Scope.Scope, sessionScope),
-                  // Bound scope close after cleanup; a wedged finalizer must not hold the open lock or interrupter.
-                  Effect.onError(() =>
-                    dropReservation.pipe(
-                      Effect.andThen(
-                        prepared.issued
-                          ? clearMcpSession(input.threadId, mcpCredentialId)
-                          : Effect.void,
-                      ),
-                      Effect.ensuring(
-                        closeScopeWithin(sessionScope, {
-                          providerSessionId: input.providerSessionId,
-                          reason: "open_failed",
-                        }),
-                      ),
                     ),
                   ),
-                  Effect.mapError(
-                    (cause) =>
-                      new ProviderSessionOpenError({
-                        instanceId: input.modelSelection.instanceId,
-                        providerSessionId: input.providerSessionId,
-                        cause,
-                      }),
-                  ),
-                  withMetrics({
-                    counter: providerSessionsTotal,
-                    attributes: { provider: adapter.driver, operation: "open" },
-                  }),
-                );
+                ),
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderSessionOpenError({
+                      instanceId: input.modelSelection.instanceId,
+                      providerSessionId: input.providerSessionId,
+                      cause,
+                    }),
+                ),
+                withMetrics({
+                  counter: providerSessionsTotal,
+                  attributes: { provider: adapter.driver, operation: "open" },
+                }),
+              );
               const eventSubscribers = yield* Ref.make<
                 ReadonlyMap<number, ProviderSessionEventSubscriber>
               >(new Map());

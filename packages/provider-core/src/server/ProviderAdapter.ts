@@ -555,6 +555,7 @@ export interface ProviderAdapterV2SessionRuntime {
       | undefined;
     readonly acknowledge: (through: number) => Effect.Effect<void, ProviderAdapterV2Error>;
     readonly resume: Effect.Effect<void>;
+    readonly awaitCaughtUp?: Effect.Effect<void>;
   };
   /** Manager runtimes broadcast independent subscriptions; adapters may expose only a single-consumer stream. */
   readonly subscribeEvents?: Effect.Effect<ProviderAdapterV2EventSubscription>;

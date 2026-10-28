@@ -18,6 +18,8 @@ import {
   ThreadId,
   TurnItemId,
 } from "@t3tools/contracts";
+import type * as Context from "effect/Context";
+import * as ProviderSessionBackend from "../provider/ProviderSessionBackend.ts";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -458,6 +460,7 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
 });
 
 function layerTest(input: {
+  readonly backend?: Context.Service.Shape<typeof ProviderSessionBackend.ProviderSessionBackend>;
   readonly state: Ref.Ref<TestProviderRuntimeState>;
   readonly idleTimeoutMs: number;
   readonly maxIdlePinMs?: number;
@@ -565,6 +568,9 @@ function layerTest(input: {
           layerProviderEventIngestorTest,
           layerConfiguredMcpRegistry,
           layerTestStores,
+          ...(input.backend === undefined
+            ? []
+            : [Layer.succeed(ProviderSessionBackend.ProviderSessionBackend, input.backend)]),
           ...(input.serverSettingsLayer === undefined ? [] : [input.serverSettingsLayer]),
           ...(input.projectServiceLayer === undefined ? [] : [input.projectServiceLayer]),
         ),
@@ -1392,47 +1398,70 @@ it.effect("ProviderSessionManagerV2 stops a session still opening when its layer
   }),
 );
 
-it.effect("ProviderSessionManagerV2 interrupts event subscriptions on server shutdown", () =>
-  Effect.gen(function* () {
-    const state = yield* Ref.make(emptyState);
-    const effect = Effect.gen(function* () {
-      const eventSink = yield* EventSink.EventSinkV2;
-      const idAllocator = yield* IdAllocator.IdAllocatorV2;
-      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
-      const now = yield* DateTime.now;
-      const threadId = ThreadId.make("thread-provider-session-manager-shutdown-subscription");
-      const providerSessionId = yield* idAllocator.allocate.providerSession({
-        providerInstanceId: modelSelection.instanceId,
-        threadId,
-      });
-      yield* eventSink.write({
-        events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
-      });
-      const runtime = yield* manager.open({
-        threadId,
-        providerSessionId,
-        modelSelection,
-        runtimePolicy,
-      });
-      const bufferedSubscription = yield* runtime.subscribeEvents!;
-      const activeSubscription = yield* runtime.subscribeEvents!;
-      const adapterQueue = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId));
-      assert.isDefined(adapterQueue);
-      yield* Queue.offer(adapterQueue!, {
-        type: "provider_session.updated",
-        driver: CODEX_DRIVER,
-        providerSession: runtime.providerSession,
-      });
-      assert.isTrue(Option.isSome(yield* activeSubscription.events.pipe(Stream.runHead)));
+it.effect.each([false, true])(
+  "ProviderSessionManagerV2 interrupts subscriptions on shutdown while preserving hosted sessions (%s)",
+  (retained) =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const effect = Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("thread-provider-session-manager-shutdown-subscription");
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        yield* eventSink.write({
+          events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+        });
+        const runtime = yield* manager.open({
+          threadId,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+        const bufferedSubscription = yield* runtime.subscribeEvents!;
+        const activeSubscription = yield* runtime.subscribeEvents!;
+        const adapterQueue = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId));
+        assert.isDefined(adapterQueue);
+        yield* Queue.offer(adapterQueue!, {
+          type: "provider_session.updated",
+          driver: CODEX_DRIVER,
+          providerSession: runtime.providerSession,
+        });
+        assert.isTrue(Option.isSome(yield* activeSubscription.events.pipe(Stream.runHead)));
 
-      yield* manager.shutdown;
+        const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
+        const credential = yield* mcpSessions.read(threadId);
+        assert.isDefined(credential);
+        yield* manager.shutdown;
+        const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+        const projection = yield* projectionStore.getThreadProjection(threadId);
+        assert.equal(
+          projection.providerSessions.find((session) => session.id === providerSessionId)?.status,
+          retained ? "ready" : "stopped",
+        );
+        assert.deepEqual(yield* mcpSessions.read(threadId), retained ? credential : undefined);
 
-      const exit = yield* bufferedSubscription.events.pipe(Stream.runCollect, Effect.exit);
-      assert.isTrue(Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause));
-    });
+        const exit = yield* bufferedSubscription.events.pipe(Stream.runCollect, Effect.exit);
+        assert.isTrue(Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause));
+      });
 
-    yield* effect.pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 60_000 })));
-  }),
+      yield* effect.pipe(
+        Effect.provide(
+          layerTest({
+            state,
+            idleTimeoutMs: 60_000,
+            backend: {
+              retains: () => retained,
+              terminate: () => Effect.die("server shutdown must not terminate hosted sessions"),
+            },
+          }),
+        ),
+      );
+    }),
 );
 
 it.effect("ProviderSessionManagerV2 drains subscribers when the provider stops", () =>

@@ -34,6 +34,8 @@ export class ProviderSessionHostError extends Schema.TaggedError<ProviderSession
 export const HostedProviderSession = Schema.Struct({
   providerSession: OrchestrationV2ProviderSession,
   incarnation: Schema.String,
+  journalHead: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+  acknowledgedThrough: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
   lease: Schema.String,
   attached: Schema.Boolean,
   ended: Schema.Boolean,
@@ -82,6 +84,8 @@ export class ProviderSessionHost extends Context.Service<
 
 interface HostedSession {
   incarnation: string;
+  journalHead: number;
+  acknowledgedThrough: number;
   runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime;
   providerSession: OrchestrationV2ProviderSession;
   scope: Scope.Closeable;
@@ -96,6 +100,8 @@ function describe(entry: HostedSession): HostedProviderSession {
   return {
     providerSession: entry.providerSession,
     incarnation: entry.incarnation,
+    journalHead: entry.journalHead,
+    acknowledgedThrough: entry.acknowledgedThrough,
     lease: entry.lease,
     attached: entry.attached,
     ended: entry.ended,
@@ -187,6 +193,8 @@ const make = Effect.gen(function* () {
           yield* Scope.addFinalizer(childScope, PubSub.shutdown(changed));
           const entry: HostedSession = {
             incarnation,
+            journalHead: 0,
+            acknowledgedThrough: 0,
             runtime,
             providerSession: runtime.providerSession,
             scope: childScope,
@@ -200,13 +208,15 @@ const make = Effect.gen(function* () {
           yield* runtime.events.pipe(
             Stream.runForEach((event) =>
               journal.append(input.providerSessionId, event).pipe(
-                Effect.tap(() =>
+                Effect.tap((envelope) =>
                   Effect.sync(() => {
+                    entry.journalHead = envelope.sequence;
                     if (event.type === "provider_session.updated")
                       entry.providerSession = event.providerSession;
                   }),
                 ),
                 Effect.andThen(PubSub.publish(changed, undefined)),
+                (effect) => lock.withLock(input.providerSessionId, effect),
               ),
             ),
             Effect.catchCause((cause) =>
@@ -325,7 +335,9 @@ const make = Effect.gen(function* () {
 
   const acknowledge = Effect.fn("ProviderSessionHost.acknowledge")(
     function* (sessionId: ProviderSessionId, lease: string, through: number) {
-      yield* requireSession(sessionId, lease);
+      const entry = yield* requireSession(sessionId, lease);
+      if (through > entry.journalHead)
+        return yield* new ProviderSessionHostError({ operation: "acknowledge", sessionId });
       yield* journal
         .acknowledge(sessionId, through)
         .pipe(
@@ -333,6 +345,7 @@ const make = Effect.gen(function* () {
             (cause) => new ProviderSessionHostError({ operation: "acknowledge", sessionId, cause }),
           ),
         );
+      entry.acknowledgedThrough = Math.max(entry.acknowledgedThrough, through);
     },
     (effect, sessionId) => lock.withLock(sessionId, effect),
   );

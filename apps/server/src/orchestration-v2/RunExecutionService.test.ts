@@ -3887,6 +3887,11 @@ it.effect(
               input.providerReceipt?.operation === "consumer-complete" &&
               !completed.has(input.providerReceipt.sequence)
             ) {
+              const ids = backgroundScenarioIds("handover:consumer-ack");
+              assert.equal(
+                input.providerReceipt.consumer,
+                `run:${ids.runId.length}:${ids.runId}:${ids.attemptId}`,
+              );
               completed.add(input.providerReceipt.sequence);
               order.push(`persist:${input.providerReceipt.sequence}`);
             }

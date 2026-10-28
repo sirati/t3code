@@ -761,12 +761,13 @@ function makeLocalCommandHarness(input: {
     ),
   );
   return {
-    adopt: (terminal?: ProviderAdapter.ProviderAdapterV2TerminalEvent) =>
+    adopt: (terminal?: ProviderAdapter.ProviderAdapterV2TerminalEvent, attemptId?: RunAttemptId) =>
       Effect.gen(function* () {
         yield* (yield* ProviderTurnStart.ProviderTurnStartServiceV2).adopt({
           threadId,
           runId,
           ...(terminal === undefined ? {} : { terminal }),
+          ...(attemptId === undefined ? {} : { attemptId }),
           session: {
             instanceId: newInstanceId,
             driver: providerThread.driver,
@@ -848,7 +849,27 @@ effectIt.effect(
       const completed = harness.projection();
       harness.setProjection({
         ...completed,
-        attempts: completed.attempts.map((attempt) => ({ ...attempt, providerTurnId: turnId })),
+        attempts: completed.attempts.map((attempt) => ({
+          ...attempt,
+          providerTurnId: turnId,
+          status: "completed",
+        })),
+        nodes: completed.nodes.map((node) =>
+          node.id === adopted.attempt.rootNodeId ? { ...node, status: "completed" } : node,
+        ),
+        providerTurns: [
+          {
+            id: turnId,
+            providerThreadId: adopted.providerThread.id,
+            nodeId: adopted.rootNode.id,
+            runAttemptId: adopted.attempt.id,
+            nativeTurnRef: null,
+            ordinal: 1,
+            status: "completed",
+            startedAt: completed.runs[0]!.requestedAt,
+            completedAt: completed.runs[0]!.requestedAt,
+          },
+        ],
       });
       const terminal: ProviderAdapter.ProviderAdapterV2TerminalEvent = {
         type: "turn.terminal",
@@ -869,6 +890,68 @@ effectIt.effect(
         .pipe(Effect.result);
       expect(wrongRun._tag).toBe("Failure");
       expect(harness.startRootRun).toHaveBeenCalledTimes(2);
+      const settled = harness.projection();
+      const currentChild = {
+        id: NodeId.make("current-child"),
+        threadId: adopted.appThread.id,
+        runId: adopted.run.id,
+        parentNodeId: NodeId.make("new-root"),
+        origin: "provider_native" as const,
+        createdBy: "agent" as const,
+        driver: adopted.session.driver,
+        providerInstanceId: adopted.session.instanceId,
+        providerThreadId: ProviderThreadId.make("current-child-native"),
+        childThreadId: ThreadId.make("current-child-thread"),
+        nativeTaskRef: null,
+        prompt: "current attempt",
+        title: null,
+        model: null,
+        status: "running" as const,
+        result: null,
+        startedAt: completed.runs[0]!.requestedAt,
+        completedAt: null,
+        updatedAt: completed.runs[0]!.requestedAt,
+      };
+
+      harness.setProjection({
+        ...settled,
+        nodes: [
+          ...settled.nodes,
+          {
+            ...adopted.rootNode,
+            id: NodeId.make("new-root"),
+            rootNodeId: NodeId.make("new-root"),
+            status: "running",
+          },
+        ],
+        subagents: [currentChild],
+        runs: settled.runs.map((run) => ({
+          ...run,
+          status: "running",
+          activeAttemptId: RunAttemptId.make("new-attempt"),
+          providerThreadId: ProviderThreadId.make("new-owner"),
+          rootNodeId: NodeId.make("new-root"),
+        })),
+      });
+      yield* harness.adopt(terminal, harness.attemptId);
+      const historical = harness.startRootRun.mock.calls[2]![0];
+      expect(historical.attempt.id).toBe(harness.attemptId);
+      expect(historical.rootNode.id).toBe(adopted.rootNode.id);
+      expect(historical.providerThread.id).toBe(adopted.providerThread.id);
+      expect(historical.run.status).toBe("completed");
+      expect(
+        historical.adoptExistingTurn!.lifecycleEvents.some(
+          (event) => event.type === "subagent.updated" && event.subagent.id === currentChild.id,
+        ),
+      ).toBe(false);
+      expect(
+        historical.adoptExistingTurn!.lifecycleEvents.some(
+          (event) => event.type === "node.updated" && event.node.id === "new-root",
+        ),
+      ).toBe(false);
+      expect(yield* historical.shouldFinalizeRun!()).toBe(false);
+      expect(harness.projection().runs[0]!.activeAttemptId).toBe("new-attempt");
+      expect(harness.events).toEqual([]);
     }),
 );
 

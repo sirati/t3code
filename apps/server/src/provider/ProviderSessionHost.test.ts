@@ -226,7 +226,12 @@ it.live(
         yield* host.detach(sessionId, first.lease);
         yield* Fiber.interrupt(oldModelCaller);
         assert.equal((yield* host.list)[0]!.turnOperations[0]!.state, "pending");
-        yield* emit(event);
+        const nextTurn = {
+          ...event,
+          providerTurnId: ProviderTurnId.make("next-native-turn"),
+          runOrdinal: 2,
+        };
+        yield* emit(nextTurn);
         const existing = yield* host.open(instanceId, input);
         assert.equal(opened, 1);
         assert.equal(closed, 0);
@@ -239,7 +244,8 @@ it.live(
           yield* host.events(sessionId, second.lease, 0).pipe(Stream.runHead),
         );
         assert.equal(replayed.sequence, received.sequence + 1);
-        assert.deepEqual(replayed.event, event);
+        assert.deepEqual(replayed.event, nextTurn);
+        assert.deepEqual((yield* host.list)[0]!.lastTerminals, [event, nextTurn]);
         assert.equal(
           (yield* host.close(sessionId, first.lease).pipe(Effect.result))._tag,
           "Failure",
@@ -359,7 +365,7 @@ it.live(
             },
           );
           const pending = Option.getOrThrow(yield* remote.envelopes.pipe(Stream.runHead));
-          assert.deepEqual(pending.event, event);
+          assert.deepEqual(pending.event, nextTurn);
           assert.deepEqual(remote.runtime.eventDelivery!.receiptFor(pending.event), {
             incarnation: attached.incarnation,
             sequence: pending.sequence,
@@ -382,7 +388,10 @@ it.live(
         yield* Effect.gen(function* () {
           const client = yield* ProviderSessionTransport.ProviderSessionClient;
           assert.deepEqual(yield* client["mcp.credentials"]({}), credentials);
-          assert.deepEqual((yield* client["session.list"]({}))[0]!.lastTerminals, [event]);
+          assert.deepEqual((yield* client["session.list"]({}))[0]!.lastTerminals, [
+            event,
+            nextTurn,
+          ]);
           const current = (yield* client["session.list"]({}))[0]!;
           assert.deepEqual(current.runConsumers, [runConsumer]);
           const attached = yield* client["session.attach"]({ sessionId, lease: current.lease });
@@ -512,8 +521,17 @@ it.live(
             "Failure",
           );
           assert.deepEqual((yield* client["session.list"]({}))[0]!.runConsumers, [runConsumer]);
-          yield* remote.runtime.eventDelivery!.releaseRunConsumer!(runConsumer);
+          const otherConsumer = { ...runConsumer, runId: RunId.make("other-live-run") };
+          yield* remote.runtime.eventDelivery!.retainRunConsumer!(otherConsumer);
+          yield* remote.runtime.eventDelivery!.releaseRunConsumer!({
+            ...runConsumer,
+            providerTurnId: event.providerTurnId,
+          });
+          assert.deepEqual((yield* client["session.list"]({}))[0]!.runConsumers, [otherConsumer]);
+          assert.deepEqual((yield* client["session.list"]({}))[0]!.lastTerminals, [nextTurn]);
+          yield* remote.runtime.eventDelivery!.releaseRunConsumer!(otherConsumer);
           assert.deepEqual((yield* client["session.list"]({}))[0]!.runConsumers, []);
+          assert.isEmpty((yield* client["session.list"]({}))[0]!.lastTerminals);
           assert.equal(closed, 0);
           yield* client["session.close"]({ sessionId, lease: attached.lease });
         }).pipe(Effect.provide(clientLayer));

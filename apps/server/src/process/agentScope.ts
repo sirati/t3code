@@ -11,6 +11,7 @@ import {
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { resolveCommandPath } from "@t3tools/shared/shell";
 import * as Effect from "effect/Effect";
+import * as Context from "effect/Context";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
@@ -91,6 +92,13 @@ const CLEAR_FAILED_INTERVAL = "1 second";
 const CLEAR_FAILED_ATTEMPTS = 120;
 const MAX_TRACKED_THREADS = 500;
 
+export const CleanupLeftoverAgents = Context.Reference<boolean>(
+  "t3/agentScope/CleanupLeftoverAgents",
+  {
+    defaultValue: () => true,
+  },
+);
+
 export const make = Effect.gen(function* () {
   const platform = yield* HostProcess.Platform;
   if (platform !== "linux") return AgentScope.defaultValue();
@@ -99,6 +107,7 @@ export const make = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const hostEnvironment = yield* HostProcess.Environment;
+  const cleanupLeftovers = yield* CleanupLeftoverAgents;
   const { stateDir } = yield* ServerConfig.ServerConfig;
   const ownedSlice = ownedAgentSlice(stateDir);
   const layerScope = yield* Effect.scope;
@@ -155,7 +164,7 @@ export const make = Effect.gen(function* () {
       const systemdRun = yield* resolve("systemd-run", hostEnvironment);
       const systemctl = yield* resolve("systemctl", hostEnvironment);
       if (systemdRun === null || systemctl === null) return undefined;
-      yield* stopLeftoverAgents(systemctl);
+      if (cleanupLeftovers) yield* stopLeftoverAgents(systemctl);
       const probe = (options: ReadonlyArray<string>) =>
         run(systemdRun, [
           "--user",

@@ -9,6 +9,7 @@ import * as CliError from "effect/cli/CliError";
 import * as ServerConfig from "../config.ts";
 import * as ProviderHostDescriptor from "../provider/ProviderHostDescriptor.ts";
 import * as ProviderPrivateTransport from "../provider/ProviderPrivateTransport.ts";
+import { CleanupLeftoverAgents } from "../process/agentScope.ts";
 import { BackendDaemonReady } from "../backendDaemonReady.ts";
 import { reportReady, stopRequested } from "./backendDaemonReady.ts";
 import { awaitLauncherLoss } from "../launcherWatch.ts";
@@ -45,6 +46,7 @@ const runServerCommand = Effect.fn("server.runServerCommand")(function* (
     const transport = yield* ProviderHostDescriptor.read(options.providerHostDescriptorFile);
     run = run.pipe(
       Effect.provideService(ProviderPrivateTransport.HostTransportConfig, transport),
+      Effect.provideService(CleanupLeftoverAgents, false),
       Effect.provideService(BackendDaemonReady, reportReady("backend")),
       Effect.raceFirst(stopRequested.pipe(Effect.andThen(Effect.interrupt))),
     );

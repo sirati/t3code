@@ -30,6 +30,7 @@ export interface BackendDaemonSupervisorOptions {
   readonly backendCommand: (descriptorFile: string) => Promise<DaemonCommand>;
   readonly environment?: Readonly<NodeJS.ProcessEnv>;
   readonly workingDirectory?: string;
+  readonly output?: "inherit" | "ignore";
   readonly startupTimeoutMs?: number;
   readonly shutdownTimeoutMs?: number;
   readonly onError: (error: Error) => void;
@@ -120,7 +121,12 @@ export class BackendDaemonSupervisor {
         ? {}
         : { cwd: this.#options.workingDirectory }),
       detached: this.#options.platform !== "win32",
-      stdio: ["ignore", "inherit", "inherit", "ipc"],
+      stdio: [
+        "ignore",
+        this.#options.output ?? "inherit",
+        this.#options.output ?? "inherit",
+        "ipc",
+      ],
     });
     const ready = Promise.withResolvers<void>();
     const exited = Promise.withResolvers<void>();

@@ -16,7 +16,13 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import * as ServerConfig from "../config.ts";
 import { makeCodexAppServerSpawnCommand } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
 import * as ProcessRunner from "../processRunner.ts";
-import { classifyScope, make, ownedAgentSlice, type ScopeState } from "./agentScope.ts";
+import {
+  CleanupLeftoverAgents,
+  classifyScope,
+  make,
+  ownedAgentSlice,
+  type ScopeState,
+} from "./agentScope.ts";
 
 const running: ScopeState = {
   loadState: "loaded",
@@ -55,7 +61,12 @@ const withFakeSystemd = <A, E>(
   {
     oomPolicy = true,
     stopFails = false,
-  }: { readonly oomPolicy?: boolean; readonly stopFails?: boolean } = {},
+    cleanupLeftovers = true,
+  }: {
+    readonly oomPolicy?: boolean;
+    readonly stopFails?: boolean;
+    readonly cleanupLeftovers?: boolean;
+  } = {},
 ) =>
   Effect.gen(function* () {
     const bin = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-agent-scope-"));
@@ -103,6 +114,7 @@ const withFakeSystemd = <A, E>(
     });
     const fileSystem = yield* FileSystem.FileSystem;
     const scope = yield* make.pipe(
+      Effect.provideService(CleanupLeftoverAgents, cleanupLeftovers),
       Effect.provideService(ProcessRunner.ProcessRunner, runner),
       Effect.provideService(HostProcess.Platform, "linux"),
       Effect.provideService(HostProcess.Environment, { PATH: bin, XDG_RUNTIME_DIR: "/run/user/1" }),
@@ -167,6 +179,18 @@ const launchCodex = (scope: Effect.Success<typeof make>, threadId: string) =>
   );
 
 describe("AgentScope service", () => {
+  it.effect("leaves the persistent host's agents running in a replacement backend", () =>
+    withFakeSystemd(
+      ({ scope, units, calls, stateDir }) =>
+        Effect.gen(function* () {
+          units.set(ownedAgentSlice(stateDir), { activeState: "active", result: "success" });
+          yield* scope.wrap({ command: "agent", args: [], name: "terminal" });
+          expect(stopsOf(calls)).toEqual([]);
+        }),
+      { cleanupLeftovers: false },
+    ),
+  );
+
   it.effect("labels a thread from its newest scope until its next session clears it", () =>
     withFakeSystemd(({ scope, units }) =>
       Effect.gen(function* () {

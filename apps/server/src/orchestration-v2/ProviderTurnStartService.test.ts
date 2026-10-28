@@ -761,17 +761,19 @@ function makeLocalCommandHarness(input: {
     ),
   );
   return {
-    adopt: Effect.gen(function* () {
-      yield* (yield* ProviderTurnStart.ProviderTurnStartServiceV2).adopt({
-        threadId,
-        runId,
-        session: {
-          instanceId: newInstanceId,
-          driver: providerThread.driver,
-          providerSessionId,
-        } as ProviderAdapter.ProviderAdapterV2SessionRuntime,
-      });
-    }).pipe(Effect.provide(layer)),
+    adopt: (terminal?: ProviderAdapter.ProviderAdapterV2TerminalEvent) =>
+      Effect.gen(function* () {
+        yield* (yield* ProviderTurnStart.ProviderTurnStartServiceV2).adopt({
+          threadId,
+          runId,
+          ...(terminal === undefined ? {} : { terminal }),
+          session: {
+            instanceId: newInstanceId,
+            driver: providerThread.driver,
+            providerSessionId,
+          } as ProviderAdapter.ProviderAdapterV2SessionRuntime,
+        });
+      }).pipe(Effect.provide(layer)),
     getThreadRecords,
     getTurnStartContext,
     setProjection: (next: OrchestrationV2ThreadProjection) => {
@@ -812,7 +814,7 @@ effectIt.effect(
         ...before,
         runs: before.runs.map((run) => ({ ...run, status: "running" })),
       });
-      yield* harness.adopt;
+      yield* harness.adopt();
       expect(harness.open).not.toHaveBeenCalled();
       expect(harness.tryHandlePromptCommand).not.toHaveBeenCalled();
       expect(harness.events).toEqual([]);
@@ -839,9 +841,34 @@ effectIt.effect(
         ...current,
         runs: current.runs.map((run) => ({ ...run, status: "completed" })),
       });
-      const rejected = yield* harness.adopt.pipe(Effect.result);
+      const rejected = yield* harness.adopt().pipe(Effect.result);
       expect(rejected._tag).toBe("Failure");
       expect(harness.startRootRun).toHaveBeenCalledTimes(1);
+      const turnId = ProviderTurnId.make("retained-terminal");
+      const completed = harness.projection();
+      harness.setProjection({
+        ...completed,
+        attempts: completed.attempts.map((attempt) => ({ ...attempt, providerTurnId: turnId })),
+      });
+      const terminal: ProviderAdapter.ProviderAdapterV2TerminalEvent = {
+        type: "turn.terminal",
+        driver: adopted.session.driver,
+        providerThreadId: adopted.providerThread.id,
+        providerTurnId: turnId,
+        runOrdinal: adopted.run.ordinal,
+        status: "completed",
+        failure: null,
+        threadDisposition: "reusable",
+      };
+      yield* harness.adopt(terminal);
+      expect(
+        harness.startRootRun.mock.calls[1]![0].adoptExistingTurn!.lifecycleEvents.at(-1),
+      ).toEqual(terminal);
+      const wrongRun = yield* harness
+        .adopt({ ...terminal, runOrdinal: terminal.runOrdinal + 1 })
+        .pipe(Effect.result);
+      expect(wrongRun._tag).toBe("Failure");
+      expect(harness.startRootRun).toHaveBeenCalledTimes(2);
     }),
 );
 

@@ -1,6 +1,7 @@
 import {
   ProviderInstanceId,
   ProviderSessionId,
+  type ProviderThreadId,
   OrchestrationV2ProviderSession,
 } from "@t3tools/contracts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -41,6 +42,7 @@ export const HostedProviderSession = Schema.Struct({
   ended: Schema.Boolean,
   backgroundTasksEndWithProcess: Schema.Boolean,
   methods: Schema.Array(Schema.String),
+  lastTerminals: Schema.Array(ProviderAdapter.ProviderAdapterV2TerminalEvent),
 });
 export type HostedProviderSession = typeof HostedProviderSession.Type;
 
@@ -94,6 +96,7 @@ interface HostedSession {
   attached: boolean;
   ended: boolean;
   failure: unknown;
+  lastTerminals: Map<ProviderThreadId, ProviderAdapter.ProviderAdapterV2TerminalEvent>;
 }
 
 function describe(entry: HostedSession): HostedProviderSession {
@@ -105,6 +108,7 @@ function describe(entry: HostedSession): HostedProviderSession {
     lease: entry.lease,
     attached: entry.attached,
     ended: entry.ended,
+    lastTerminals: [...entry.lastTerminals.values()],
     backgroundTasksEndWithProcess: entry.runtime.backgroundTasksEndWithProcess === true,
     methods: [
       ...Object.keys(entry.runtime).filter(
@@ -203,6 +207,7 @@ const make = Effect.gen(function* () {
             attached: false,
             ended: false,
             failure: undefined,
+            lastTerminals: new Map(),
           };
           sessions.set(input.providerSessionId, entry);
           yield* runtime.events.pipe(
@@ -211,6 +216,8 @@ const make = Effect.gen(function* () {
                 Effect.tap((envelope) =>
                   Effect.sync(() => {
                     entry.journalHead = envelope.sequence;
+                    if (event.type === "turn.terminal")
+                      entry.lastTerminals.set(event.providerThreadId, event);
                     if (event.type === "provider_session.updated")
                       entry.providerSession = event.providerSession;
                   }),

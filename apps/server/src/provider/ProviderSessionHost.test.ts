@@ -199,6 +199,7 @@ it.live(
         yield* emit(event);
         const received = Option.getOrThrow(yield* Fiber.join(readFirst));
         yield* host.acknowledge(sessionId, first.lease, received.sequence);
+        assert.deepEqual((yield* host.list)[0]!.lastTerminals, [event]);
         yield* host.detach(sessionId, first.lease);
         yield* emit(event);
         const existing = yield* host.open(instanceId, input);
@@ -348,6 +349,7 @@ it.live(
         yield* Effect.gen(function* () {
           const client = yield* ProviderSessionTransport.ProviderSessionClient;
           assert.deepEqual(yield* client["mcp.credentials"]({}), credentials);
+          assert.deepEqual((yield* client["session.list"]({}))[0]!.lastTerminals, [event]);
           const current = (yield* client["session.list"]({}))[0]!;
           const attached = yield* client["session.attach"]({ sessionId, lease: current.lease });
           assert.equal(attached.acknowledgedThrough, received.sequence);

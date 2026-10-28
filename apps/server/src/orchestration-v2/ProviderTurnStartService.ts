@@ -115,6 +115,7 @@ export interface ProviderTurnStartServiceV2Shape {
     readonly threadId: ThreadId;
     readonly runId: RunId;
     readonly session: ProviderAdapter.ProviderAdapterV2SessionRuntime;
+    readonly terminal?: ProviderAdapter.ProviderAdapterV2TerminalEvent;
   }) => Effect.Effect<void, ProviderTurnStartError>;
   readonly start: (input: {
     readonly threadId: ThreadId;
@@ -1562,7 +1563,18 @@ export const layer: Layer.Layer<
           providerThread.providerSessionId !== input.session.providerSessionId ||
           run.providerInstanceId !== input.session.instanceId ||
           providerThread.driver !== input.session.driver ||
-          !(run.status === "starting" || run.status === "running" || run.status === "waiting")
+          (input.terminal !== undefined && input.terminal.status !== run.status) ||
+          !(
+            run.status === "starting" ||
+            run.status === "running" ||
+            run.status === "waiting" ||
+            (input.terminal !== undefined &&
+              input.terminal.status === run.status &&
+              input.terminal.providerTurnId === attempt.providerTurnId &&
+              input.terminal.providerThreadId === providerThread.id &&
+              input.terminal.runOrdinal === run.ordinal &&
+              input.terminal.driver === input.session.driver)
+          )
         )
           return yield* new ProviderTurnStartError({ runId: input.runId });
         const inheritedBackgroundTurnItems = RunExecutionService.selectInheritedBackgroundTurnItems(
@@ -1652,7 +1664,10 @@ export const layer: Layer.Layer<
               .filter((turn) => turn.runAttemptId === attempt.id)
               .map((turn) => turn.ordinal),
           ),
-          adoptExistingTurn: { lifecycleEvents },
+          adoptExistingTurn: {
+            lifecycleEvents:
+              input.terminal === undefined ? lifecycleEvents : [...lifecycleEvents, input.terminal],
+          },
           loadInheritedBackgroundTurnItems: controls.loadInheritedBackgroundTurnItems,
           relatedThreadIds,
           relatedProviderThreadIds,

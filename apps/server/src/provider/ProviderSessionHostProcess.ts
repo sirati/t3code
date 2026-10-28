@@ -1,3 +1,5 @@
+import * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
+import * as ProviderContinuationHost from "./ProviderContinuationHost.ts";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -23,10 +25,15 @@ const journal = ProviderSessionJournal.layer.pipe(
   ),
 );
 
-const layer = ProviderSessionTransport.layerServer.pipe(
+const layer = Layer.merge(
+  ProviderSessionTransport.layerServer,
+  ProviderContinuationHost.layerWorker,
+).pipe(
+  Layer.provide(ProviderContinuationHost.layer),
   Layer.provideMerge(ProviderSessionHost.layer.pipe(Layer.provide(journal))),
   Layer.provide(ProviderMcpIngress.layer),
   Layer.provide(layerProviderSessionInfrastructure),
+  Layer.provide(ProviderContinuationRequests.layer),
 );
 
 export const run = Layer.launch(layer);

@@ -568,6 +568,10 @@ export interface ProviderAdapterV2SessionRuntime {
     readonly acknowledge: (through: number) => Effect.Effect<void, ProviderAdapterV2Error>;
     readonly resume: Effect.Effect<void>;
     readonly awaitCaughtUp?: Effect.Effect<void>;
+    readonly awaitTurnStart?: (
+      consumer: ProviderAdapterV2RunConsumer,
+      kind: "start" | "compact",
+    ) => Effect.Effect<void, ProviderAdapterV2Error>;
     readonly retainRunConsumer?: (
       consumer: ProviderAdapterV2RunConsumer,
     ) => Effect.Effect<void, ProviderAdapterV2Error>;

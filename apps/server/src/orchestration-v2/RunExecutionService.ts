@@ -27,6 +27,7 @@ import {
 import * as Context from "effect/Context";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -561,6 +562,7 @@ export interface RunExecutionServiceV2StartRootRunInput {
   readonly attemptId: RunAttemptId;
   readonly providerTurnOrdinal: number;
   readonly adoptExistingTurn?: {
+    readonly awaitStartup?: Effect.Effect<void, ProviderAdapter.ProviderAdapterV2Error>;
     readonly lifecycleEvents: ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>;
   };
   readonly nativeThreadHasTurns?: boolean;
@@ -1005,14 +1007,17 @@ export const layer: Layer.Layer<
             ? undefined
             : { ...delivery, consumer: `run:${input.run.id}`, operation };
         };
+        let workerOwnsSubscription = false;
         const eventSubscription: ProviderAdapter.ProviderAdapterV2EventSubscription =
-          input.session.subscribeEvents === undefined
-            ? { events: input.session.events, close: Effect.void }
-            : yield* input.session.subscribeEvents;
+          yield* Effect.acquireRelease(
+            input.session.subscribeEvents ??
+              Effect.succeed({ events: input.session.events, close: Effect.void }),
+            (subscription: ProviderAdapter.ProviderAdapterV2EventSubscription) =>
+              workerOwnsSubscription ? Effect.void : subscription.close,
+          );
         const inheritedBackgroundTurnItems = yield* (
           input.loadInheritedBackgroundTurnItems?.() ?? Effect.succeed([])
         ).pipe(
-          Effect.onError(() => eventSubscription.close),
           Effect.mapError(
             (cause) =>
               new RunExecutionStartError({
@@ -1319,6 +1324,16 @@ export const layer: Layer.Layer<
           runId: input.run.id,
           attemptId: input.attempt.id,
         };
+        const releaseHostedConsumer = (
+          input.session.eventDelivery?.releaseRunConsumer?.(hostedRunConsumer) ?? Effect.void
+        ).pipe(
+          Effect.catchCause(() =>
+            Effect.logWarning("Could not release hosted run consumer", {
+              runId: input.run.id,
+              attemptId: input.attempt.id,
+            }),
+          ),
+        );
         const replayCaughtUp = input.session.eventDelivery?.awaitCaughtUp;
         const consumerEvents =
           input.adoptExistingTurn === undefined || replayCaughtUp === undefined
@@ -1326,7 +1341,10 @@ export const layer: Layer.Layer<
             : eventSubscription.events.pipe(
                 Stream.merge(Stream.fromEffect(replayCaughtUp).pipe(Stream.map(() => null))),
               );
-        const providerEventTask = consumerEvents.pipe(
+        const workerReady = yield* Deferred.make<void>();
+        const providerEventTask = Stream.unwrap(
+          Deferred.succeed(workerReady, undefined).pipe(Effect.as(consumerEvents)),
+        ).pipe(
           Stream.mapEffect((event) =>
             Effect.gen(function* () {
               if (event === null) return { event, accepted: false };
@@ -1652,24 +1670,14 @@ export const layer: Layer.Layer<
                 );
               }),
           ),
+          Effect.interruptible,
           Effect.onExit((exit) =>
             Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)
               ? Effect.void
-              : (
-                  input.session.eventDelivery?.releaseRunConsumer?.(hostedRunConsumer) ??
-                  Effect.void
-                ).pipe(
-                  Effect.catchCause(() =>
-                    Effect.logWarning("Could not release hosted run consumer", {
-                      runId: input.run.id,
-                      attemptId: input.attempt.id,
-                    }),
-                  ),
-                ),
+              : releaseHostedConsumer,
           ),
           Effect.ensuring(endPreviewActivity),
           Effect.ensuring(eventSubscription.close),
-          Effect.interruptible,
         );
         const providerEventFiber = yield* Effect.gen(function* () {
           yield* (
@@ -1684,10 +1692,13 @@ export const layer: Layer.Layer<
                 }),
             ),
           );
-          return yield* providerEventTask.pipe(Effect.forkDetach);
+          const fiber = yield* providerEventTask.pipe(Effect.forkDetach);
+          yield* Deferred.await(workerReady);
+          workerOwnsSubscription = true;
+          return fiber;
         }).pipe(
           Effect.uninterruptible,
-          Effect.onError(() => eventSubscription.close.pipe(Effect.andThen(endPreviewActivity))),
+          Effect.onError(() => endPreviewActivity),
         );
 
         // A provider turn is a sign that the session is still alive. Keep
@@ -1705,8 +1716,64 @@ export const layer: Layer.Layer<
           Effect.forkDetach,
           Effect.asVoid,
         );
+        const onStartFailure = Effect.fn("RunExecutionService.onStartFailure")(function* (
+          cause: Cause.Cause<unknown>,
+          failureClass: OrchestrationV2ProviderFailure["class"],
+        ) {
+          if (Cause.hasInterruptsOnly(cause)) return yield* Effect.interrupt;
+          return yield* Effect.logError("orchestration V2 provider turn start failed", {
+            runId: input.run.id,
+            cause,
+          }).pipe(
+            Effect.andThen(Fiber.interrupt(providerEventFiber)),
+            Effect.andThen(Ref.get(latestProviderThread)),
+            Effect.flatMap((providerThread) =>
+              Ref.get(latestTurnItemOrdinal).pipe(
+                Effect.flatMap((latestItemOrdinal) =>
+                  Ref.get(openRunOwnedSubagents).pipe(
+                    Effect.flatMap((openSubagents) =>
+                      writeFinalRunEvents({
+                        run: input.run,
+                        rootNode: input.rootNode,
+                        checkpointScope: input.checkpointScope,
+                        providerThread,
+                        attempt: input.attempt,
+                        writeIfRunCurrent: {
+                          activeAttemptId: input.attempt.id,
+                          expectedStatus: "running",
+                        },
+                        openRunOwnedSubagents: openSubagents,
+                        terminal: makeFailedTerminalEvent(
+                          makeProviderFailure({
+                            cause: Cause.squash(cause),
+                            class: failureClass,
+                          }),
+                          latestItemOrdinal + 1,
+                        ),
+                        failureItemPersisted: false,
+                        refreshAfterTurn,
+                      }),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            Effect.tap(() => releaseHostedConsumer),
+            Effect.mapError(
+              (writeCause) =>
+                new RunExecutionStartError({
+                  commandId: input.commandId,
+                  runId: input.run.id,
+                  cause: { start: cause, write: writeCause },
+                }),
+            ),
+          );
+        });
         if (input.adoptExistingTurn !== undefined) {
-          yield* keepMcpCredentialAlive;
+          yield* (input.adoptExistingTurn.awaitStartup ?? Effect.void).pipe(
+            Effect.tap(() => keepMcpCredentialAlive),
+            Effect.catchCause((cause) => onStartFailure(cause, "provider_error")),
+          );
           return;
         }
         const appContext = (yield* mcpAppModelContext
@@ -1754,6 +1821,7 @@ export const layer: Layer.Layer<
             : yield* Effect.exit(input.shouldStartProviderTurn());
         if (Exit.isSuccess(shouldStart) && !shouldStart.value) {
           yield* Fiber.interrupt(providerEventFiber);
+          yield* releaseHostedConsumer;
           return;
         }
 
@@ -1777,55 +1845,10 @@ export const layer: Layer.Layer<
           // on the already-detached ingestion fiber.
           Effect.tap(() => keepMcpCredentialAlive),
           Effect.catchCause((cause) =>
-            Effect.logError("orchestration V2 provider turn start failed", {
-              runId: input.run.id,
-              cause,
-            }).pipe(
-              Effect.andThen(Fiber.interrupt(providerEventFiber)),
-              Effect.andThen(Ref.get(latestProviderThread)),
-              Effect.flatMap((providerThread) =>
-                Ref.get(latestTurnItemOrdinal).pipe(
-                  Effect.flatMap((latestItemOrdinal) =>
-                    Ref.get(openRunOwnedSubagents).pipe(
-                      Effect.flatMap((openSubagents) =>
-                        writeFinalRunEvents({
-                          run: input.run,
-                          rootNode: input.rootNode,
-                          checkpointScope: input.checkpointScope,
-                          providerThread,
-                          attempt: input.attempt,
-                          writeIfRunCurrent: {
-                            activeAttemptId: input.attempt.id,
-                            expectedStatus: "running",
-                          },
-                          openRunOwnedSubagents: openSubagents,
-                          terminal: makeFailedTerminalEvent(
-                            makeProviderFailure({
-                              cause: Cause.squash(cause),
-                              class: Exit.isFailure(shouldStart) ? "unknown" : "provider_error",
-                            }),
-                            latestItemOrdinal + 1,
-                          ),
-                          failureItemPersisted: false,
-                          refreshAfterTurn,
-                        }),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-              Effect.mapError(
-                (writeCause) =>
-                  new RunExecutionStartError({
-                    commandId: input.commandId,
-                    runId: input.run.id,
-                    cause: { start: cause, write: writeCause },
-                  }),
-              ),
-            ),
+            onStartFailure(cause, Exit.isFailure(shouldStart) ? "unknown" : "provider_error"),
           ),
         );
-      }),
+      }, Effect.scoped),
     } satisfies RunExecutionServiceV2Shape);
   }),
 );

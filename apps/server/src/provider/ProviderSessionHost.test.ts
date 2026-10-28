@@ -65,6 +65,9 @@ it.live(
               );
             }),
         );
+      const modelStarted = yield* Deferred.make<void>();
+      const modelFinish = yield* Deferred.make<void>();
+      let modelCalls = 0;
       const probeStarted = yield* Deferred.make<void>();
       const probeFinish = yield* Deferred.make<void>();
       const probeCompleted = yield* Deferred.make<void>();
@@ -185,6 +188,24 @@ it.live(
         const created = yield* host.open(instanceId, input).pipe(Effect.scoped);
         assert.equal(closed, 0);
         const first = yield* host.attach(sessionId, created.lease);
+        const modelOperation = {
+          kind: "start" as const,
+          consumer: {
+            threadId: input.threadId,
+            runId: RunId.make("admitted-model"),
+            attemptId: RunAttemptId.make("admitted-attempt"),
+          },
+        };
+        const oldModelCaller = yield* host
+          .withTurn(sessionId, first.lease, modelOperation, () =>
+            Effect.gen(function* () {
+              modelCalls += 1;
+              yield* Deferred.succeed(modelStarted, undefined);
+              yield* Deferred.await(modelFinish);
+            }),
+          )
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(modelStarted);
         const event: ProviderAdapter.ProviderAdapterV2Event = {
           type: "turn.terminal",
           driver,
@@ -203,6 +224,8 @@ it.live(
         yield* host.acknowledge(sessionId, first.lease, received.sequence);
         assert.deepEqual((yield* host.list)[0]!.lastTerminals, [event]);
         yield* host.detach(sessionId, first.lease);
+        yield* Fiber.interrupt(oldModelCaller);
+        assert.equal((yield* host.list)[0]!.turnOperations[0]!.state, "pending");
         yield* emit(event);
         const existing = yield* host.open(instanceId, input);
         assert.equal(opened, 1);
@@ -367,6 +390,85 @@ it.live(
           const remote = yield* ProviderSessionRemoteRuntime.connect(attached, {
             startPaused: true,
           });
+          assert.equal(attached.turnOperations[0]!.state, "pending");
+          const accepted = yield* client["session.awaitTurn"]({
+            sessionId,
+            lease: attached.lease,
+            operation: modelOperation,
+          }).pipe(Effect.forkChild);
+          yield* Deferred.succeed(modelFinish, undefined);
+          yield* Fiber.join(accepted);
+          yield* host.withTurn(sessionId, attached.lease, modelOperation, () =>
+            Effect.die("must not execute an admitted model twice"),
+          );
+          assert.equal(modelCalls, 1);
+          assert.equal(
+            (yield* client["session.list"]({}))[0]!.turnOperations[0]!.state,
+            "succeeded",
+          );
+          const failedOperation = {
+            ...modelOperation,
+            consumer: {
+              ...modelOperation.consumer,
+              attemptId: RunAttemptId.make("failed-admission"),
+            },
+          };
+          const startFailure = new ProviderAdapter.ProviderAdapterProtocolError({
+            driver,
+            detail: "fixture startup refused",
+          });
+          assert.equal(
+            (yield* host
+              .withTurn(sessionId, attached.lease, failedOperation, () => Effect.fail(startFailure))
+              .pipe(Effect.result))._tag,
+            "Failure",
+          );
+          const retainedFailure = yield* client["session.awaitTurn"]({
+            sessionId,
+            lease: attached.lease,
+            operation: failedOperation,
+          }).pipe(Effect.result);
+          assert.equal(retainedFailure._tag, "Failure");
+          if (retainedFailure._tag === "Failure")
+            assert.deepEqual(retainedFailure.failure, startFailure);
+          assert.equal(
+            (yield* host
+              .withTurn(sessionId, attached.lease, failedOperation, () =>
+                Effect.die("must not retry a failed admission"),
+              )
+              .pipe(Effect.result))._tag,
+            "Failure",
+          );
+          const failedSnapshot = (yield* client["session.list"]({}))[0]!.turnOperations.find(
+            (operation) => operation.consumer.attemptId === failedOperation.consumer.attemptId,
+          );
+          assert.equal(failedSnapshot?.state, "failed");
+          yield* host.setRunConsumer(sessionId, attached.lease, modelOperation.consumer, false);
+          yield* host.setRunConsumer(sessionId, attached.lease, failedOperation.consumer, false);
+          assert.isEmpty((yield* host.list)[0]!.turnOperations);
+          const finishing = {
+            ...modelOperation,
+            consumer: {
+              ...modelOperation.consumer,
+              attemptId: RunAttemptId.make("finishing-admission"),
+            },
+          };
+          const finishingStarted = yield* Deferred.make<void>();
+          const finish = yield* Deferred.make<void>();
+          const finishingCaller = yield* host
+            .withTurn(sessionId, attached.lease, finishing, () =>
+              Deferred.succeed(finishingStarted, undefined).pipe(
+                Effect.andThen(Deferred.await(finish)),
+              ),
+            )
+            .pipe(Effect.forkChild);
+          yield* Deferred.await(finishingStarted);
+          yield* host.setRunConsumer(sessionId, attached.lease, finishing.consumer, false);
+          assert.equal((yield* host.list)[0]!.turnOperations[0]!.state, "pending");
+          yield* Deferred.succeed(finish, undefined);
+          yield* Fiber.join(finishingCaller);
+          assert.isEmpty((yield* host.list)[0]!.turnOperations);
+
           const caughtUp = yield* Deferred.make<void>();
           yield* remote.runtime.eventDelivery!.awaitCaughtUp!.pipe(
             Effect.andThen(Deferred.succeed(caughtUp, undefined)),

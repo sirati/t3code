@@ -3059,6 +3059,7 @@ it.effect("releases a settled adopted consumer once its journal replay is acknow
 
 function captureRootRunTermination(input: {
   readonly key: string;
+  readonly loadInheritedBackgroundTurnItems?: RunExecutionService.RunExecutionServiceV2StartRootRunInput["loadInheritedBackgroundTurnItems"];
   readonly adoptExistingTurn?: RunExecutionService.RunExecutionServiceV2StartRootRunInput["adoptExistingTurn"];
   readonly eventDelivery?: ProviderAdapter.ProviderAdapterV2SessionRuntime["eventDelivery"];
   readonly acknowledgeEvent?: ProviderAdapter.ProviderAdapterV2EventSubscription["acknowledge"];
@@ -3193,6 +3194,9 @@ function captureRootRunTermination(input: {
     const previewActivityEnded = yield* Effect.gen(function* () {
       const runExecution = yield* RunExecutionService.RunExecutionServiceV2;
       const start = runExecution.startRootRun({
+        ...(input.loadInheritedBackgroundTurnItems === undefined
+          ? {}
+          : { loadInheritedBackgroundTurnItems: input.loadInheritedBackgroundTurnItems }),
         ...(input.adoptExistingTurn === undefined
           ? {}
           : { adoptExistingTurn: input.adoptExistingTurn }),
@@ -3946,5 +3950,106 @@ it.effect("retains the hosted run manifest when core shutdown interrupts ingesti
     assert.lengthOf(retained, 1);
     assert.isEmpty(released);
     assert.isEmpty(observed.finalEvents);
+  }),
+);
+
+it.effect("records a retained startup failure without executing a replacement model", () =>
+  Effect.gen(function* () {
+    let released = 0;
+    const result = yield* captureRootRunTermination({
+      key: "handover:failed-admission",
+      adoptExistingTurn: {
+        lifecycleEvents: [],
+        awaitStartup: Effect.fail(
+          new ProviderAdapter.ProviderAdapterProtocolError({
+            driver,
+            detail: "retained startup refusal",
+          }),
+        ),
+      },
+      appContext: Effect.die("must not reconstruct a prompt"),
+      startTurn: () => Effect.die("must not retry the original model call"),
+      events: () => Stream.never,
+      shouldFinalizeRun: () => Effect.succeed(true),
+      eventDelivery: {
+        receiptFor: () => undefined,
+        acknowledge: () => Effect.void,
+        resume: Effect.void,
+        releaseRunConsumer: () =>
+          Effect.sync(() => {
+            released += 1;
+          }),
+      },
+    });
+    assert.deepEqual(
+      result.finalEvents.flatMap((event) =>
+        event.type === "run.updated" ? [event.payload.status] : [],
+      ),
+      ["failed"],
+    );
+    assert.equal(released, 1);
+  }),
+);
+
+it.effect(
+  "does not fail a retained run when core shutdown interrupts startup acknowledgement",
+  () =>
+    Effect.gen(function* () {
+      const closed = yield* Deferred.make<void>();
+      let writes = 0;
+      let releases = 0;
+      const result = yield* captureRootRunTermination({
+        key: "handover:interrupted-admission",
+        adoptExistingTurn: { lifecycleEvents: [], awaitStartup: Effect.interrupt },
+        events: () => Stream.fromEffect(Effect.interrupt),
+        shouldFinalizeRun: () => Effect.die("must preserve the active attempt"),
+        onSinkWrite: () =>
+          Effect.sync(() => {
+            writes += 1;
+          }),
+        onSubscriptionClose: Deferred.succeed(closed, undefined).pipe(Effect.asVoid),
+        eventDelivery: {
+          receiptFor: () => undefined,
+          acknowledge: () => Effect.void,
+          resume: Effect.void,
+          releaseRunConsumer: () =>
+            Effect.sync(() => {
+              releases += 1;
+            }),
+        },
+      }).pipe(Effect.exit);
+      assert.isTrue(Exit.isFailure(result) && Cause.hasInterruptsOnly(result.cause));
+      yield* Deferred.await(closed);
+      assert.equal(writes, 0);
+      assert.equal(releases, 0);
+    }),
+);
+
+it.effect("closes an event subscription when adoption is cancelled before its worker starts", () =>
+  Effect.gen(function* () {
+    let closed = 0;
+    let retained = 0;
+    const result = yield* captureRootRunTermination({
+      key: "handover:cancelled-setup",
+      adoptExistingTurn: { lifecycleEvents: [] },
+      loadInheritedBackgroundTurnItems: () => Effect.interrupt,
+      events: () => Stream.never,
+      shouldFinalizeRun: () => Effect.die("must not finalize during interrupted setup"),
+      onSubscriptionClose: Effect.sync(() => {
+        closed += 1;
+      }),
+      eventDelivery: {
+        receiptFor: () => undefined,
+        acknowledge: () => Effect.void,
+        resume: Effect.void,
+        retainRunConsumer: () =>
+          Effect.sync(() => {
+            retained += 1;
+          }),
+      },
+    }).pipe(Effect.exit);
+    assert.isTrue(Exit.isFailure(result) && Cause.hasInterruptsOnly(result.cause));
+    assert.equal(closed, 1);
+    assert.equal(retained, 0);
   }),
 );

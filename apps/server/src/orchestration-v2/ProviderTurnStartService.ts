@@ -1665,6 +1665,21 @@ export const layer: Layer.Layer<
               .map((turn) => turn.ordinal),
           ),
           adoptExistingTurn: {
+            ...(input.session.eventDelivery?.awaitTurnStart === undefined
+              ? {}
+              : {
+                  awaitStartup: input.session.eventDelivery.awaitTurnStart(
+                    {
+                      threadId: input.threadId,
+                      runId: run.id,
+                      attemptId: attempt.id,
+                    },
+                    message.attachments.length === 0 &&
+                      message.text.trim().toLowerCase() === "/compact"
+                      ? "compact"
+                      : "start",
+                  ),
+                }),
             lifecycleEvents:
               input.terminal === undefined ? lifecycleEvents : [...lifecycleEvents, input.terminal],
           },

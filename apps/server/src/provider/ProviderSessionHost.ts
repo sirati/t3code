@@ -6,6 +6,9 @@ import {
 } from "@t3tools/contracts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
+import * as Cause from "effect/Cause";
+import * as Deferred from "effect/Deferred";
+import * as Option from "effect/Option";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
@@ -22,7 +25,14 @@ import * as ProviderSessionJournal from "./ProviderSessionJournal.ts";
 export class ProviderSessionHostError extends Schema.TaggedError<ProviderSessionHostError>()(
   "ProviderSessionHostError",
   {
-    operation: Schema.Literals(["open", "ownership", "events", "acknowledge", "close"]),
+    operation: Schema.Literals([
+      "open",
+      "ownership",
+      "events",
+      "acknowledge",
+      "close",
+      "turn-operation",
+    ]),
     sessionId: ProviderSessionId,
     cause: Schema.optional(Schema.Defect()),
   },
@@ -31,6 +41,29 @@ export class ProviderSessionHostError extends Schema.TaggedError<ProviderSession
     return `Provider session host failed during ${this.operation}.`;
   }
 }
+
+export const HostedTurnOperationKey = Schema.Struct({
+  consumer: ProviderAdapter.ProviderAdapterV2RunConsumer,
+  kind: Schema.Literals(["start", "compact"]),
+});
+export type HostedTurnOperationKey = typeof HostedTurnOperationKey.Type;
+
+export const HostedTurnOperation = Schema.Union([
+  Schema.Struct({
+    ...HostedTurnOperationKey.fields,
+    state: Schema.Literals(["pending", "succeeded"]),
+  }),
+  Schema.Struct({
+    ...HostedTurnOperationKey.fields,
+    state: Schema.Literal("failed"),
+    error: ProviderAdapter.ProviderAdapterV2Error,
+  }),
+]);
+type HostedTurnOperation = typeof HostedTurnOperation.Type;
+
+const isAdapterError = Schema.is(ProviderAdapter.ProviderAdapterV2Error);
+const operationKey = ({ consumer, kind }: HostedTurnOperationKey) =>
+  `${kind}:${consumer.runId.length}:${consumer.runId}:${consumer.attemptId}`;
 
 export const HostedProviderSession = Schema.Struct({
   providerSession: OrchestrationV2ProviderSession,
@@ -44,6 +77,7 @@ export const HostedProviderSession = Schema.Struct({
   methods: Schema.Array(Schema.String),
   lastTerminals: Schema.Array(ProviderAdapter.ProviderAdapterV2TerminalEvent),
   runConsumers: Schema.Array(ProviderAdapter.ProviderAdapterV2RunConsumer),
+  turnOperations: Schema.Array(HostedTurnOperation),
 });
 export type HostedProviderSession = typeof HostedProviderSession.Type;
 
@@ -68,6 +102,19 @@ export class ProviderSessionHost extends Context.Service<
       lease: string,
       use: (runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime) => Effect.Effect<A, E>,
     ) => Effect.Effect<A, E | ProviderSessionHostError>;
+    readonly withTurn: (
+      sessionId: ProviderSessionId,
+      lease: string,
+      operation: HostedTurnOperationKey,
+      use: (
+        runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime,
+      ) => Effect.Effect<void, ProviderAdapter.ProviderAdapterV2Error>,
+    ) => Effect.Effect<void, ProviderAdapter.ProviderAdapterV2Error | ProviderSessionHostError>;
+    readonly awaitTurn: (
+      sessionId: ProviderSessionId,
+      lease: string,
+      operation: HostedTurnOperationKey,
+    ) => Effect.Effect<void, ProviderAdapter.ProviderAdapterV2Error | ProviderSessionHostError>;
     readonly events: (
       sessionId: ProviderSessionId,
       lease: string,
@@ -105,6 +152,14 @@ interface HostedSession {
   failure: unknown;
   lastTerminals: Map<ProviderThreadId, ProviderAdapter.ProviderAdapterV2TerminalEvent>;
   runConsumers: Map<string, ProviderAdapter.ProviderAdapterV2RunConsumer>;
+  turnOperations: Map<
+    string,
+    {
+      snapshot: HostedTurnOperation;
+      completion: Deferred.Deferred<void, ProviderAdapter.ProviderAdapterV2Error>;
+      retired: boolean;
+    }
+  >;
 }
 
 function describe(entry: HostedSession): HostedProviderSession {
@@ -118,6 +173,7 @@ function describe(entry: HostedSession): HostedProviderSession {
     ended: entry.ended,
     lastTerminals: [...entry.lastTerminals.values()],
     runConsumers: [...entry.runConsumers.values()],
+    turnOperations: [...entry.turnOperations.values()].map((operation) => operation.snapshot),
     backgroundTasksEndWithProcess: entry.runtime.backgroundTasksEndWithProcess === true,
     methods: [
       ...Object.keys(entry.runtime).filter(
@@ -218,6 +274,7 @@ const make = Effect.gen(function* () {
             failure: undefined,
             lastTerminals: new Map(),
             runConsumers: new Map(),
+            turnOperations: new Map(),
           };
           sessions.set(input.providerSessionId, entry);
           yield* runtime.events.pipe(
@@ -309,6 +366,83 @@ const make = Effect.gen(function* () {
     return yield* Fiber.join(admitted);
   });
 
+  const withTurn: ProviderSessionHost["Service"]["withTurn"] = Effect.fn(
+    "ProviderSessionHost.withTurn",
+  )(function* (
+    sessionId: ProviderSessionId,
+    lease: string,
+    operation: HostedTurnOperationKey,
+    use: (
+      runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime,
+    ) => Effect.Effect<void, ProviderAdapter.ProviderAdapterV2Error>,
+  ) {
+    const completion = yield* lock.withLock(
+      sessionId,
+      Effect.gen(function* () {
+        const entry = yield* requireSession(sessionId, lease);
+        const key = operationKey(operation);
+        const existing = entry.turnOperations.get(key);
+        if (existing !== undefined) {
+          if (existing.snapshot.consumer.threadId !== operation.consumer.threadId)
+            return yield* new ProviderSessionHostError({ operation: "turn-operation", sessionId });
+          return existing.completion;
+        }
+        const completion = yield* Deferred.make<void, ProviderAdapter.ProviderAdapterV2Error>();
+        const record: {
+          snapshot: HostedTurnOperation;
+          completion: typeof completion;
+          retired: boolean;
+        } = {
+          snapshot: { ...operation, state: "pending" },
+          completion,
+          retired: false,
+        };
+        entry.turnOperations.set(key, record);
+        yield* use(entry.runtime).pipe(
+          Effect.interruptible,
+          Effect.catchCause((cause) => {
+            const error = Cause.findErrorOption(cause);
+            return Effect.fail(
+              Option.isSome(error) && isAdapterError(error.value)
+                ? error.value
+                : new ProviderAdapter.ProviderAdapterProtocolError({
+                    driver: entry.runtime.driver,
+                    detail: "The admitted provider turn could not complete startup.",
+                    cause,
+                  }),
+            );
+          }),
+          Effect.exit,
+          Effect.flatMap((exit) =>
+            Effect.sync(() => {
+              record.snapshot = Exit.isSuccess(exit)
+                ? { ...operation, state: "succeeded" }
+                : {
+                    ...operation,
+                    state: "failed",
+                    error: Option.getOrThrow(Cause.findErrorOption(exit.cause)),
+                  };
+              if (record.retired) entry.turnOperations.delete(key);
+            }).pipe(Effect.andThen(Deferred.done(completion, exit))),
+          ),
+          Effect.forkIn(entry.scope),
+        );
+        return completion;
+      }).pipe(Effect.uninterruptible),
+    );
+    yield* Deferred.await(completion);
+  });
+
+  const awaitTurn: ProviderSessionHost["Service"]["awaitTurn"] = Effect.fn(
+    "ProviderSessionHost.awaitTurn",
+  )(function* (sessionId: ProviderSessionId, lease: string, operation: HostedTurnOperationKey) {
+    const entry = yield* requireSession(sessionId, lease);
+    const pending = entry.turnOperations.get(operationKey(operation));
+    if (pending === undefined || pending.snapshot.consumer.threadId !== operation.consumer.threadId)
+      return yield* new ProviderSessionHostError({ operation: "turn-operation", sessionId });
+    yield* Deferred.await(pending.completion);
+  });
+
   const events = (sessionId: ProviderSessionId, lease: string, after: number) =>
     Stream.unwrap(
       Effect.gen(function* () {
@@ -377,7 +511,19 @@ const make = Effect.gen(function* () {
       const entry = yield* requireSession(sessionId, lease);
       const key = `${consumer.runId.length}:${consumer.runId}:${consumer.attemptId}`;
       if (retained) entry.runConsumers.set(key, consumer);
-      else entry.runConsumers.delete(key);
+      else {
+        entry.runConsumers.delete(key);
+        // Consumer release follows durable terminal ingestion, so this attempt cannot start again.
+        for (const [id, operation] of entry.turnOperations) {
+          if (
+            operation.snapshot.consumer.runId !== consumer.runId ||
+            operation.snapshot.consumer.attemptId !== consumer.attemptId
+          )
+            continue;
+          operation.retired = true;
+          if (operation.snapshot.state !== "pending") entry.turnOperations.delete(id);
+        }
+      }
     },
     (effect, sessionId) => lock.withLock(sessionId, effect),
   );
@@ -399,6 +545,8 @@ const make = Effect.gen(function* () {
   );
 
   return ProviderSessionHost.of({
+    withTurn,
+    awaitTurn,
     setRunConsumer,
     open,
     list: Effect.sync(() => [...sessions.values()].map(describe)),

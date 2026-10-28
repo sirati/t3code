@@ -13,6 +13,8 @@ import { McpCredentialSnapshot } from "../mcp/McpCredentialSnapshot.ts";
 import { ProviderSessionEnvelope } from "./ProviderSessionJournal.ts";
 import { OpenHostedSessionInput, sessionMethods } from "./ProviderSessionMethods.ts";
 
+const decodeRunConsumer = Schema.decodeUnknownEffect(Adapter.ProviderAdapterV2RunConsumer);
+
 const isAdapterError = Schema.is(Adapter.ProviderAdapterV2Error);
 const sequenceCursor = Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0));
 
@@ -100,6 +102,14 @@ export const ProviderSessionRpc = RpcGroup.make(
     success: Schema.Void,
     error,
   }),
+  Rpc.make("session.awaitTurn", {
+    payload: Schema.Struct({
+      ...ownedSession,
+      operation: ProviderSessionHost.HostedTurnOperationKey,
+    }),
+    success: Schema.Void,
+    error,
+  }),
   Rpc.make("session.events", {
     payload: Schema.Struct({ ...ownedSession, after: sequenceCursor }),
     success: Schema.toCodecJson(ProviderSessionEnvelope),
@@ -169,24 +179,50 @@ export const layer = ProviderSessionRpc.toLayer(
       "session.close": (request) => host.close(request.sessionId, request.lease),
       "session.acknowledge": (request) =>
         host.acknowledge(request.sessionId, request.lease, request.through),
+      "session.awaitTurn": (request) =>
+        host.awaitTurn(request.sessionId, request.lease, request.operation),
       "session.events": (request) => host.events(request.sessionId, request.lease, request.after),
-      "session.invoke": (request) =>
-        host.withRuntime(request.sessionId, request.lease, (runtime) =>
-          Effect.gen(function* () {
-            for (const config of request.mcp ?? []) yield* configureMcp(config);
-            return yield* sessionMethods[request.method].invoke(runtime, request.argument).pipe(
-              Effect.mapError((cause) =>
-                isAdapterError(cause)
-                  ? cause
-                  : new Adapter.ProviderAdapterProtocolError({
-                      driver: runtime.driver,
-                      detail: "Invalid hosted provider operation payload.",
-                      cause,
-                    }),
-              ),
-            );
-          }),
-        ),
+      // The RPC middleware owns the request span.
+      "session.invoke": Effect.fnUntraced(function* (request) {
+        const invoke = Effect.fnUntraced(function* (
+          runtime: Adapter.ProviderAdapterV2SessionRuntime,
+        ) {
+          for (const config of request.mcp ?? []) yield* configureMcp(config);
+          return yield* sessionMethods[request.method].invoke(runtime, request.argument).pipe(
+            Effect.mapError((cause) =>
+              isAdapterError(cause)
+                ? cause
+                : new Adapter.ProviderAdapterProtocolError({
+                    driver: runtime.driver,
+                    detail: "Invalid hosted provider operation payload.",
+                    cause,
+                  }),
+            ),
+          );
+        });
+        if (request.method === "startTurn" || request.method === "compactThread") {
+          const consumer = yield* decodeRunConsumer(request.argument).pipe(
+            Effect.mapError(
+              (cause) =>
+                new ProviderSessionHost.ProviderSessionHostError({
+                  operation: "turn-operation",
+                  sessionId: request.sessionId,
+                  cause,
+                }),
+            ),
+          );
+          return yield* host.withTurn(
+            request.sessionId,
+            request.lease,
+            {
+              consumer,
+              kind: request.method === "startTurn" ? "start" : "compact",
+            },
+            (runtime) => invoke(runtime).pipe(Effect.asVoid),
+          );
+        }
+        return yield* host.withRuntime(request.sessionId, request.lease, invoke);
+      }),
     });
   }),
 );

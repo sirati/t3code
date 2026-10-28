@@ -129,6 +129,11 @@ export const connect = Effect.fn("ProviderSessionRemoteRuntime.connect")(functio
       acknowledge,
       resume: Deferred.succeed(deliveryStarted, undefined).pipe(Effect.asVoid),
       awaitCaughtUp: Deferred.await(caughtUp),
+      awaitTurnStart: (consumer, kind) =>
+        client["session.awaitTurn"]({
+          ...owned,
+          operation: { consumer, kind },
+        }).pipe(Effect.mapError(failure)),
       retainRunConsumer: (consumer) =>
         client["session.runConsumer"]({ ...owned, consumer, retained: true }).pipe(
           Effect.mapError(failure),

@@ -2763,6 +2763,7 @@ export default function ChatView(props: ChatViewProps) {
           stoppedAt: limitRecoveryRun.completedAt ?? activeThreadShell.updatedAt,
           settled: activeThreadShell.settledOverride === "settled",
           requestPending: pendingApprovals.length > 0 || pendingUserInputs.length > 0,
+          proxyRecoveryId: serverRuntime?.proxyRecoveryId ?? null,
           recovery: activeThreadShell.limitRecovery ?? null,
           snoozedUntil: activeThreadShell.snoozedUntil,
           timestampFormat,

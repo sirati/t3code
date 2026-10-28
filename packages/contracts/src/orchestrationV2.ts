@@ -448,10 +448,13 @@ export const OrchestrationV2ProviderCapabilities = Schema.Struct({
 });
 export type OrchestrationV2ProviderCapabilities = typeof OrchestrationV2ProviderCapabilities.Type;
 
+const CliproxyRecoveryId = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9_-]{16}$/));
+
 export const OrchestrationV2LimitRecovery = Schema.Struct({
   requestId: Schema.optional(CommandId),
   runId: RunId,
-  resetAt: IsoDateTime,
+  resetAt: Schema.NullOr(IsoDateTime),
+  proxyRecoveryId: Schema.optional(CliproxyRecoveryId),
   autoResume: Schema.Boolean,
   snooze: Schema.optional(Schema.Boolean),
 });
@@ -459,7 +462,8 @@ export type OrchestrationV2LimitRecovery = typeof OrchestrationV2LimitRecovery.T
 
 export const OrchestrationV2LimitRecoveryUpdate = Schema.Struct({
   runId: RunId,
-  resetAt: IsoDateTime,
+  resetAt: Schema.NullOr(IsoDateTime),
+  proxyRecoveryId: Schema.optional(CliproxyRecoveryId),
   autoResume: Schema.optional(Schema.Boolean),
   snooze: Schema.optional(Schema.Boolean),
 }).check(
@@ -1750,6 +1754,7 @@ export const OrchestrationV2ProviderFailure = Schema.Struct({
   retryable: Schema.NullOr(Schema.Boolean),
   resetAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   verificationUrl: Schema.optionalKey(GoogleAccountVerificationUrl),
+  proxyRecoveryId: Schema.optional(CliproxyRecoveryId),
 });
 export type OrchestrationV2ProviderFailure = typeof OrchestrationV2ProviderFailure.Type;
 
@@ -2454,6 +2459,7 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   lastErrorClass: Schema.optional(Schema.NullOr(OrchestrationV2ProviderFailureClass)),
   lastErrorCode: Schema.optional(Schema.NullOr(Schema.String)),
   usageLimitResetAt: Schema.optional(Schema.NullOr(IsoDateTime)),
+  proxyRecoveryId: Schema.optional(Schema.NullOr(CliproxyRecoveryId)),
   pendingRuntimeRequest: Schema.NullOr(OrchestrationV2PendingRuntimeRequestSummary),
   /** Guest messages waiting for the owner to send or dismiss. Absent from older servers. */
   pendingGuestMessageCount: Schema.optional(NonNegativeInt),
@@ -3638,6 +3644,7 @@ export const OrchestrationV2Command = Schema.Union([
     steerFollowUpOfRunId: Schema.optional(RunId),
     steerFollowUpAfterRunOrdinal: Schema.optional(NonNegativeInt),
     usageLimitRecoveryRequestId: Schema.optional(CommandId),
+    proxyRecoveryAvailableId: Schema.optional(CliproxyRecoveryId),
     deliveryIntent: Schema.optional(Schema.Literals(["auto", "steer", "restart"])),
     explicitQueue: Schema.optional(Schema.Literal(true)),
     delegatedCompletion: Schema.optional(

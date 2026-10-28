@@ -9489,6 +9489,8 @@ describe("ClaudeAdapterV2 background wake turns", () => {
 
   it.effect.each([
     { status: 503, cooldown: "4m 6s", seconds: 246 },
+    { status: 503, cooldown: "4m 6s", seconds: 246, ticket: true },
+    { status: 503, cooldown: "unknown", seconds: 0, ticket: true },
     { status: 503, cooldown: "1h 2m 3s", seconds: 3723 },
     { status: 503, cooldown: "7s", seconds: 7 },
     { status: 503, cooldown: "0s", seconds: 0 },
@@ -9517,6 +9519,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     },
   ])("recovers wrapped gateway limits with status $status and cooldown $cooldown", (input) =>
     Effect.gen(function* () {
+      const ticket = "ticket" in input && input.ticket ? "K5wVx3M9Sq1zAx7B" : undefined;
       const harness = yield* makeWakeHarness;
       const now = yield* DateTime.now;
       yield* harness.runtime.startTurn(
@@ -9558,7 +9561,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             input.result ??
             (input.proxy
               ? `API Error: Request rejected (429) · All credentials for model claude-opus-5-5 are cooling down (reset after ${input.cooldown}) (last error: rate_limit_error: Please try again later.)`
-              : `API Error: ${input.status} [claude/claude-opus-5-5] [429]: {"type":"error","error":{"type":"${input.errorType ?? "rate_limit_error"}","message":"Please try again later."}} (reset after ${input.cooldown}).`),
+              : `API Error: ${input.status} [claude/claude-opus-5-5] [429]: {"type":"error","error":{"type":"${input.errorType ?? "rate_limit_error"}","message":"Please try again later."}} (reset after ${input.cooldown}).${ticket ? ` [cliproxy-recovery:${ticket}]` : ""}`),
           terminalReason: "api_error",
           isError: true,
           apiErrorStatus: input.status,
@@ -9569,8 +9572,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       if (terminal.status !== "failed") return;
       assert.equal(
         terminal.failure.class,
-        input.seconds > 0 || input.proxy ? "usage_limit" : "provider_error",
+        input.seconds > 0 || input.proxy || ticket ? "usage_limit" : "provider_error",
       );
+      assert.equal(terminal.failure.proxyRecoveryId, ticket);
       if (input.seconds > 0) {
         assert.equal(terminal.failure.retryable, true);
         assert.equal(
@@ -9580,7 +9584,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           ),
         );
       } else {
-        assert.equal(terminal.failure.resetAt, input.proxy ? null : undefined);
+        assert.equal(terminal.failure.resetAt, input.proxy || ticket ? null : undefined);
       }
     }).pipe(
       Effect.provide(

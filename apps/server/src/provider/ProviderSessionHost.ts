@@ -20,6 +20,7 @@ import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
+import { OpenHostedSessionInput } from "./ProviderSessionMethods.ts";
 import * as ProviderSessionJournal from "./ProviderSessionJournal.ts";
 
 export class ProviderSessionHostError extends Schema.TaggedError<ProviderSessionHostError>()(
@@ -67,6 +68,7 @@ const operationKey = ({ consumer, kind }: HostedTurnOperationKey) =>
 
 export const HostedProviderSession = Schema.Struct({
   providerSession: OrchestrationV2ProviderSession,
+  openInput: OpenHostedSessionInput,
   incarnation: Schema.String,
   journalHead: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
   acknowledgedThrough: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
@@ -139,6 +141,7 @@ export class ProviderSessionHost extends Context.Service<
 >()("t3/provider/ProviderSessionHost") {}
 
 interface HostedSession {
+  openInput: ProviderAdapter.ProviderAdapterV2OpenSessionInput;
   incarnation: string;
   journalHead: number;
   acknowledgedThrough: number;
@@ -165,6 +168,7 @@ interface HostedSession {
 function describe(entry: HostedSession): HostedProviderSession {
   return {
     providerSession: entry.providerSession,
+    openInput: entry.openInput,
     incarnation: entry.incarnation,
     journalHead: entry.journalHead,
     acknowledgedThrough: entry.acknowledgedThrough,
@@ -261,6 +265,7 @@ const make = Effect.gen(function* () {
           );
           yield* Scope.addFinalizer(childScope, PubSub.shutdown(changed));
           const entry: HostedSession = {
+            openInput: input,
             incarnation,
             journalHead: 0,
             acknowledgedThrough: 0,

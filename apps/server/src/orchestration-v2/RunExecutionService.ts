@@ -560,6 +560,9 @@ export interface RunExecutionServiceV2StartRootRunInput {
   readonly attempt: OrchestrationV2RunAttempt;
   readonly attemptId: RunAttemptId;
   readonly providerTurnOrdinal: number;
+  readonly adoptExistingTurn?: {
+    readonly lifecycleEvents: ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>;
+  };
   readonly nativeThreadHasTurns?: boolean;
   readonly loadInheritedBackgroundTurnItems?: () => Effect.Effect<
     ReadonlyArray<InheritedBackgroundTurnItemRoute>,
@@ -916,22 +919,24 @@ export const layer: Layer.Layer<
                   .responseStreamingMode,
             ),
           );
-          yield* checkpointService
-            .captureBaseline({
-              scope: input.checkpointScope,
-              ordinalWithinScope: Math.max(0, input.run.ordinal - 1),
-            })
-            .pipe(
-              Effect.catchCauseIf(
-                (cause) => !Cause.hasInterruptsOnly(cause),
-                (_cause) =>
-                  Effect.logWarning(
-                    "orchestration V2 checkpoint baseline capture failed; starting provider without a baseline",
-                    { runId: input.run.id },
-                  ),
-              ),
-            );
+          if (input.adoptExistingTurn === undefined)
+            yield* checkpointService
+              .captureBaseline({
+                scope: input.checkpointScope,
+                ordinalWithinScope: Math.max(0, input.run.ordinal - 1),
+              })
+              .pipe(
+                Effect.catchCauseIf(
+                  (cause) => !Cause.hasInterruptsOnly(cause),
+                  (_cause) =>
+                    Effect.logWarning(
+                      "orchestration V2 checkpoint baseline capture failed; starting provider without a baseline",
+                      { runId: input.run.id },
+                    ),
+                ),
+              );
           if (
+            input.adoptExistingTurn === undefined &&
             input.shouldStartProviderTurn !== undefined &&
             !(yield* input.shouldStartProviderTurn())
           ) {
@@ -1279,6 +1284,27 @@ export const layer: Layer.Layer<
         // Held text writes nothing, so its item would take a position only
         // when finally written, behind every item that began after it.
         const reservedHeldTurnItemIds = new Set<TurnItemId>();
+        for (const event of input.adoptExistingTurn?.lifecycleEvents ?? []) {
+          const previous = yield* Ref.get(eventRouting);
+          const [accepted, routing] = routeProviderEvent(event, routeIdentity, previous);
+          yield* Ref.set(eventRouting, routing);
+          if (!accepted) continue;
+          if (
+            event.type === "provider_turn.updated" &&
+            event.providerTurn.runAttemptId === input.attempt.id
+          )
+            yield* Ref.set(latestRootProviderTurn, event.providerTurn);
+          if (event.type === "turn_item.updated")
+            yield* Ref.update(latestTurnItemOrdinal, (ordinal) =>
+              Math.max(ordinal, event.turnItem.ordinal),
+            );
+          if (event.type === "turn.terminal") {
+            yield* Ref.set(terminalEvent, event);
+            yield* Ref.set(rootTerminalSeen, true);
+            yield* Ref.set(rootRunFinalized, true);
+          }
+          yield* trackChildLifecycle(event, true);
+        }
         // Ends once the root turn and the children it drives settle. Background commands such
         // as a dev server keep this consumer alive afterwards and must not pin preview focus.
         const endPreviewActivity = yield* previewAgentActivity.begin(input.run.threadId);
@@ -1608,6 +1634,15 @@ export const layer: Layer.Layer<
           }),
         );
         yield* touchMcpCredential;
+        const keepMcpCredentialAlive = Fiber.await(providerEventFiber).pipe(
+          Effect.raceFirst(touchMcpCredential.pipe(Effect.delay("1 hour"), Effect.forever)),
+          Effect.forkDetach,
+          Effect.asVoid,
+        );
+        if (input.adoptExistingTurn !== undefined) {
+          yield* keepMcpCredentialAlive;
+          return;
+        }
         const appContext = (yield* mcpAppModelContext
           .forThread(input.run.threadId)
           .pipe(
@@ -1674,12 +1709,7 @@ export const layer: Layer.Layer<
         yield* Effect.andThen(shouldStart, startTurn).pipe(
           // Wait for acceptance so abandoned startup cannot leave a refresher
           // on the already-detached ingestion fiber.
-          Effect.tap(() =>
-            Fiber.await(providerEventFiber).pipe(
-              Effect.raceFirst(touchMcpCredential.pipe(Effect.delay("1 hour"), Effect.forever)),
-              Effect.forkDetach,
-            ),
-          ),
+          Effect.tap(() => keepMcpCredentialAlive),
           Effect.catchCause((cause) =>
             Effect.logError("orchestration V2 provider turn start failed", {
               runId: input.run.id,

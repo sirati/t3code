@@ -77,6 +77,14 @@ it.effect.each(["success", "missing-attempt", "consumer-failure"] as const)(
         assert.isFalse(yield* Deferred.isDone(finished));
         yield* Deferred.succeed(startup, undefined);
         yield* Fiber.join(waiting);
+        yield* service.prepareForShutdown;
+        assert.deepEqual(order.slice(-5), [
+          "mcp.pause",
+          "continuations.pause",
+          "mcp.drain",
+          "continuations.drain",
+          "checkpoint",
+        ]);
       });
       yield* program.pipe(
         Effect.provide(
@@ -85,6 +93,26 @@ it.effect.each(["success", "missing-attempt", "consumer-failure"] as const)(
               Layer.mergeAll(
                 McpProviderSessions.layer,
                 Layer.mock(ProviderSessionTransport.ProviderSessionClient)({
+                  "mcp.pause": (() =>
+                    Effect.sync(() => {
+                      order.push("mcp.pause");
+                    })) as ProviderSessionTransport.ProviderSessionClient["Service"]["mcp.pause"],
+                  "continuations.pause": (() =>
+                    Effect.sync(() => {
+                      order.push("continuations.pause");
+                    })) as ProviderSessionTransport.ProviderSessionClient["Service"]["continuations.pause"],
+                  "mcp.drain": (() =>
+                    Effect.sync(() => {
+                      order.push("mcp.drain");
+                    })) as ProviderSessionTransport.ProviderSessionClient["Service"]["mcp.drain"],
+                  "continuations.drain": (() =>
+                    Effect.sync(() => {
+                      order.push("continuations.drain");
+                    })) as ProviderSessionTransport.ProviderSessionClient["Service"]["continuations.drain"],
+                  "mcp.checkpoint": (() =>
+                    Effect.sync(() => {
+                      order.push("checkpoint");
+                    })) as ProviderSessionTransport.ProviderSessionClient["Service"]["mcp.checkpoint"],
                   "session.list": (() =>
                     Effect.succeed(
                       entries,
@@ -99,6 +127,7 @@ it.effect.each(["success", "missing-attempt", "consumer-failure"] as const)(
                     )) as ProviderSessionTransport.ProviderSessionClient["Service"]["mcp.configurations"],
                 }),
                 Layer.mock(McpSessionRegistry.McpSessionRegistry)({
+                  checkpoint: Effect.succeed([]),
                   restore: () =>
                     Effect.sync(() => {
                       order.push("credentials");

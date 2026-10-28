@@ -36,6 +36,7 @@ import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
 import * as ProjectStore from "./orchestration-v2/ProjectStore.ts";
 import * as ProviderRuntimeRecovery from "./orchestration-v2/ProviderRuntimeRecoveryService.ts";
 import * as ProviderSessionManager from "./orchestration-v2/ProviderSessionManager.ts";
+import * as ProviderSessionAdoption from "./provider/ProviderSessionAdoption.ts";
 import * as ThreadLaunch from "./orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagement from "./orchestration-v2/ThreadManagementService.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
@@ -52,6 +53,7 @@ it.effect.each([
   "disabled-default",
   "launch-failure",
   "project-failure",
+  "retained-adoption",
 ] as const)("keeps bootstrap launch failures separate from project failures: %s", (scenario) =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -60,6 +62,11 @@ it.effect.each([
         scenario === "disabled-default" ? "custom" : "codex",
       );
       const events: ServerLifecycleStreamEvent[] = [];
+      const adoptionPhases: string[] = [];
+      const recordPhase = (phase: string) =>
+        Effect.sync(() => {
+          adoptionPhases.push(phase);
+        });
       const recovery = {
         terminalizedRuns: 0,
         stoppedSessions: 0,
@@ -111,10 +118,21 @@ it.effect.each([
           importPendingTranscripts: Effect.succeed(imports),
         }),
         Layer.mock(ProviderRuntimeRecovery.ProviderRuntimeRecoveryService)({
-          recover: Effect.succeed(recovery),
+          recover: recordPhase("recover").pipe(Effect.as(recovery)),
           prepareForShutdown: Effect.void,
           reconcile: () => Effect.succeed(recovery),
         }),
+        scenario === "retained-adoption"
+          ? Layer.succeed(ProviderSessionAdoption.ProviderSessionAdoption, {
+              prepareForShutdown: Effect.void,
+              prepare: recordPhase("prepare").pipe(
+                Effect.as({
+                  resumeReplay: recordPhase("replay"),
+                  awaitStartup: recordPhase("startup"),
+                }),
+              ),
+            })
+          : Layer.empty,
         Layer.mock(Orchestrator.OrchestratorV2)({ recoverDelegatedTasks: Effect.void }),
         Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({ shutdown: Effect.void }),
         Layer.mock(AgentAwarenessRelay.AgentAwarenessRelay)({ start: () => Effect.void }),
@@ -224,6 +242,12 @@ it.effect.each([
         const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
         yield* startup.markHttpListening;
         const ready = yield* Effect.exit(startup.awaitCommandReady);
+        assert.deepEqual(
+          adoptionPhases,
+          scenario === "retained-adoption"
+            ? ["prepare", "recover", "replay", "startup"]
+            : ["recover"],
+        );
         assert.equal(Exit.isSuccess(ready), scenario !== "project-failure");
         const welcome = events.find((event) => event.type === "welcome");
         if (scenario === "project-failure") {

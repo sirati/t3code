@@ -27,6 +27,7 @@ import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 
+import * as RetainedProviderWork from "./RetainedProviderWork.ts";
 import { forkParked } from "../serverActivation.ts";
 
 export const OrchestrationEffectRequestV2 = Schema.Union([
@@ -208,6 +209,7 @@ export interface EffectOutboxV2Shape {
     commandId: CommandId,
   ) => Effect.Effect<ReadonlyArray<OrchestrationEffectV2>, EffectOutboxError>;
   readonly cancelUnsettled: (input: {
+    readonly preserveRetained?: boolean;
     readonly threadId: ThreadId;
     readonly effectTypes: ReadonlyArray<OrchestrationEffectRequestV2["type"]>;
     readonly reason: string;
@@ -291,6 +293,20 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
   EffectOutboxV2,
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
+    const retainedWork = yield* Effect.serviceOption(RetainedProviderWork.RetainedProviderWork);
+    const readRetained = Option.isSome(retainedWork)
+      ? retainedWork.value.read
+      : Effect.succeed(RetainedProviderWork.empty);
+    const retainedPredicate = (retained: RetainedProviderWork.Snapshot) => {
+      if (retained.sessionIds.length === 0 && retained.attemptIds.length === 0) return sql`0 = 1`;
+      return sql`(
+        json_extract(payload_json, '$.providerSessionId') IN ${sql.in(retained.sessionIds)}
+        OR json_extract(payload_json, '$.runId') IN (
+          SELECT run.run_id FROM orchestration_v2_projection_runs AS run
+          WHERE json_extract(run.payload_json, '$.activeAttemptId') IN ${sql.in(retained.attemptIds)}
+        )
+      )`;
+    };
     const available = yield* Queue.dropping<void>(64);
     const cancellationSignals = new Map<string, Deferred.Deferred<void>>();
     const settledSignals = new Map<string, Deferred.Deferred<void>>();
@@ -437,7 +453,8 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
           ),
         ),
       cancelUnsettled: Effect.fn("EffectOutbox.cancelUnsettled")(
-        function* ({ threadId, effectTypes, reason }) {
+        function* ({ threadId, effectTypes, reason, preserveRetained }) {
+          const retained = preserveRetained ? yield* readRetained : RetainedProviderWork.empty;
           if (effectTypes.length === 0) return [];
           const now = DateTime.formatIso(yield* DateTime.now);
           const rows = yield* sql<{ readonly effect_id: string }>`
@@ -451,6 +468,7 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
             WHERE thread_id = ${threadId}
               AND status IN ('pending', 'running')
               AND effect_type IN ${sql.in(effectTypes)}
+              AND NOT coalesce(${retainedPredicate(retained)}, 0)
             RETURNING effect_id
           `;
           return rows.map(({ effect_id }) => effect_id);
@@ -485,6 +503,7 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
         yield* signalSettled([effectId]);
       }),
       reconcileAfterProcessLoss: Effect.gen(function* () {
+        const retained = yield* readRetained;
         const now = DateTime.formatIso(yield* DateTime.now);
         const cancelledRows = yield* sql<{ readonly effect_id: string }>`
           UPDATE orchestration_v2_effect_outbox
@@ -496,6 +515,7 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
             last_error = 'Cancelled because the server process ended before the effect completed.'
           WHERE status IN ('pending', 'running')
             AND effect_type IN ${sql.in(PROCESS_BOUND_EFFECT_TYPES)}
+            AND NOT coalesce(${retainedPredicate(retained)}, 0)
           RETURNING effect_id
         `;
         const requeuedRows = yield* sql<{ readonly effect_id: string }>`

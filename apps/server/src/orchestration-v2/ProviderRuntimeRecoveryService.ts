@@ -16,6 +16,8 @@ import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as RetainedProviderWork from "./RetainedProviderWork.ts";
 import * as Schema from "effect/Schema";
 
 import * as EffectOutbox from "./EffectOutbox.ts";
@@ -196,6 +198,11 @@ export const make = Effect.gen(function* () {
     return [...sessions.values()];
   };
 
+  const retainedWork = yield* Effect.serviceOption(RetainedProviderWork.RetainedProviderWork);
+  const readRetained = Option.isSome(retainedWork)
+    ? retainedWork.value.read
+    : Effect.succeed(RetainedProviderWork.empty);
+
   const reconcileProjection = Effect.fn("ProviderRuntimeRecoveryService.reconcileProjection")(
     function* (
       projection: ProjectionStore.ProjectionRuntimeRecoveryState,
@@ -203,6 +210,7 @@ export const make = Effect.gen(function* () {
       continueAfterRestart: boolean,
       stoppedThisPass: ReadonlyMap<string, RecoverySession> = new Map(),
     ) {
+      projection = RetainedProviderWork.lostProjection(projection, yield* readRetained);
       const now = yield* DateTime.now;
       const runs = [] as Array<OrchestrationV2ThreadProjection["runs"][number]>;
       for (const run of nonterminalRuns(projection)) {
@@ -675,6 +683,7 @@ export const make = Effect.gen(function* () {
           .cancelUnsettled({
             threadId: projection.thread.id,
             effectTypes: EffectOutbox.PROCESS_BOUND_EFFECT_TYPES,
+            preserveRetained: true,
             reason: detail,
           })
           .pipe(
@@ -700,6 +709,7 @@ export const make = Effect.gen(function* () {
             effects,
             cancelUnsettledEffects: {
               effectTypes: EffectOutbox.PROCESS_BOUND_EFFECT_TYPES,
+              preserveRetained: true,
               reason: detail,
             },
           })
@@ -756,7 +766,8 @@ export const make = Effect.gen(function* () {
         resolveProjectSettings(continueAfterRestart, projection.thread.projectId).settings
           .continueThreadsAfterServerUpdate;
       const result = yield* reconcileProjection(projection, trigger, enabled, stoppedThisPass);
-      for (const session of projection.providerSessions) {
+      for (const session of RetainedProviderWork.lostProjection(projection, yield* readRetained)
+        .providerSessions) {
         if (session.status !== "stopped" && session.status !== "error") {
           stoppedThisPass.set(session.id, session);
         }
@@ -792,7 +803,10 @@ export const make = Effect.gen(function* () {
             .continueThreadsAfterServerUpdate
         )
           return;
-        const run = restartContinuationRun(projection, yield* DateTime.now);
+        const run = restartContinuationRun(
+          RetainedProviderWork.lostProjection(projection, yield* readRetained),
+          yield* DateTime.now,
+        );
         if (!run) return;
         const commandId = CommandId.make(`command:restart-prepare:${run.id}`);
         yield* eventSink.writeWithEffects({

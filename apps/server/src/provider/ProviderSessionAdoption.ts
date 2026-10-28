@@ -5,6 +5,8 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as RetainedProviderWork from "../orchestration-v2/RetainedProviderWork.ts";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
@@ -32,6 +34,7 @@ export class ProviderSessionAdoption extends Context.Service<
       },
       ProviderSessionAdoptionError
     >;
+    readonly prepareForShutdown: Effect.Effect<void, ProviderSessionAdoptionError>;
   }
 >()("t3/provider/ProviderSessionAdoption") {}
 
@@ -43,6 +46,7 @@ const make = Effect.gen(function* () {
   const turns = yield* ProviderTurnStartService.ProviderTurnStartServiceV2;
   const projections = yield* ProjectionStore.ProjectionStoreV2;
   const scope = yield* Scope.Scope;
+  const retainedWork = yield* Effect.serviceOption(RetainedProviderWork.RetainedProviderWork);
   const failure = (cause: unknown) => new ProviderSessionAdoptionError({ cause });
   const prepare = yield* Effect.cached(
     Effect.gen(function* () {
@@ -110,6 +114,13 @@ const make = Effect.gen(function* () {
           yield* Deferred.await(ready);
         }
       }
+      if (Option.isSome(retainedWork))
+        yield* retainedWork.value.replace({
+          sessionIds: retained.map((session) => session.providerSession.id),
+          attemptIds: retained.flatMap((session) =>
+            session.runConsumers.map((consumer) => consumer.attemptId),
+          ),
+        });
       return {
         resumeReplay: Effect.gen(function* () {
           for (const runtime of runtimes) yield* runtime.eventDelivery!.resume;
@@ -122,7 +133,22 @@ const make = Effect.gen(function* () {
       };
     }).pipe(Effect.mapError(failure)),
   );
-  return ProviderSessionAdoption.of({ prepare });
+  const prepareForShutdown = Effect.gen(function* () {
+    yield* client["mcp.pause"]({});
+    yield* client["continuations.pause"]({});
+    yield* client["mcp.drain"]({});
+    yield* client["continuations.drain"]({});
+    yield* client["mcp.checkpoint"]({ credentials: yield* credentials.checkpoint });
+    const retained = yield* client["session.list"]({});
+    if (Option.isSome(retainedWork))
+      yield* retainedWork.value.replace({
+        sessionIds: retained.map((session) => session.providerSession.id),
+        attemptIds: retained.flatMap((session) =>
+          session.runConsumers.map((consumer) => consumer.attemptId),
+        ),
+      });
+  }).pipe(Effect.mapError(failure));
+  return ProviderSessionAdoption.of({ prepare, prepareForShutdown });
 });
 
 export const layer = Layer.effect(ProviderSessionAdoption, make);

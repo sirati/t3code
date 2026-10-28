@@ -373,6 +373,7 @@ const layerSessionAdoptionProvided = Layer.unwrap(
               layerProviderSessionManagerProvided,
               layerProviderTurnStartServiceProvided,
               ProjectionStore.layer,
+              EffectOutbox.layer,
             ),
           ),
           Layer.provide(layerProjectService),

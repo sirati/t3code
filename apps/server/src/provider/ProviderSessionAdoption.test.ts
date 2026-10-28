@@ -16,6 +16,7 @@ import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
 import * as ProviderSessionManager from "../orchestration-v2/ProviderSessionManager.ts";
 import * as ProviderTurnStartService from "../orchestration-v2/ProviderTurnStartService.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
+import * as EffectOutbox from "../orchestration-v2/EffectOutbox.ts";
 import * as ProviderSessionAdoption from "./ProviderSessionAdoption.ts";
 import type { HostedProviderSession } from "./ProviderSessionHost.ts";
 import * as ProviderSessionTransport from "./ProviderSessionTransport.ts";
@@ -75,8 +76,10 @@ it.effect.each(["success", "missing-attempt", "consumer-failure"] as const)(
           Effect.forkChild,
         );
         assert.isFalse(yield* Deferred.isDone(finished));
+        assert.isFalse(order.includes("settled"));
         yield* Deferred.succeed(startup, undefined);
         yield* Fiber.join(waiting);
+        assert.equal(order.at(-1), "settled");
         yield* service.prepareForShutdown;
         assert.deepEqual(order.slice(-5), [
           "mcp.pause",
@@ -91,6 +94,12 @@ it.effect.each(["success", "missing-attempt", "consumer-failure"] as const)(
           ProviderSessionAdoption.layer.pipe(
             Layer.provide(
               Layer.mergeAll(
+                Layer.mock(EffectOutbox.EffectOutboxV2)({
+                  settleRetainedStarts: Effect.sync(() => {
+                    order.push("settled");
+                    return 1;
+                  }),
+                }),
                 McpProviderSessions.layer,
                 Layer.mock(ProviderSessionTransport.ProviderSessionClient)({
                   "mcp.pause": (() =>

@@ -138,9 +138,9 @@ it("partitions lost work without cancelling a retained historical attempt or its
   );
 });
 
-it.effect(
-  "preserves retained effects during process-loss recovery but lets explicit cancellation remove them",
-  () =>
+it.effect.each(["pending", "running"] as const)(
+  "preserves retained starts and pending controls while releasing old leases: %s",
+  (status) =>
     Effect.gen(function* () {
       const state = yield* RetainedProviderWork.RetainedProviderWork;
       const outbox = yield* EffectOutbox.EffectOutboxV2;
@@ -175,9 +175,17 @@ it.effect(
           request: { type: "provider-turn.start", runId: RunId.make("lost-run") },
         },
       ]);
-      assert.deepEqual(yield* outbox.reconcileAfterProcessLoss, { requeued: 0, cancelled: 1 });
-      assert.equal(Option.getOrThrow(yield* outbox.get("retained-start")).status, "pending");
-      assert.equal(Option.getOrThrow(yield* outbox.get("retained-interrupt")).status, "pending");
+      if (status === "running")
+        yield* sql`UPDATE orchestration_v2_effect_outbox SET status = 'running', lease_owner = 'old-core' WHERE effect_id IN ('retained-start', 'retained-interrupt')`;
+      assert.deepEqual(yield* outbox.reconcileAfterProcessLoss, {
+        requeued: 0,
+        cancelled: status === "running" ? 2 : 1,
+      });
+      assert.equal(Option.getOrThrow(yield* outbox.get("retained-start")).status, status);
+      assert.equal(
+        Option.getOrThrow(yield* outbox.get("retained-interrupt")).status,
+        status === "running" ? "cancelled" : "pending",
+      );
       assert.equal(Option.getOrThrow(yield* outbox.get("lost-start")).status, "cancelled");
       assert.deepEqual(
         yield* outbox.cancelUnsettled({
@@ -193,7 +201,33 @@ it.effect(
         effectTypes: EffectOutbox.PROCESS_BOUND_EFFECT_TYPES,
         reason: "explicit user cancellation",
       });
-      assert.deepEqual([...cancelled].sort(), ["retained-interrupt", "retained-start"]);
+      assert.deepEqual(
+        [...cancelled].sort(),
+        status === "running" ? ["retained-start"] : ["retained-interrupt", "retained-start"],
+      );
+      yield* outbox.enqueue([
+        {
+          ...common,
+          id: "adopted-start",
+          request: { type: "provider-turn.start", runId: RunId.make("retained-run") },
+        },
+        {
+          ...common,
+          id: "later-work",
+          request: { type: "provider-turn.start", runId: RunId.make("later-run") },
+        },
+      ]);
+      if (status === "running")
+        yield* sql`UPDATE orchestration_v2_effect_outbox SET status = 'running', lease_owner = 'old-core' WHERE effect_id = 'adopted-start'`;
+      assert.equal(yield* outbox.settleRetainedStarts, 1);
+      assert.equal(yield* outbox.settleRetainedStarts, 0);
+      const adopted = Option.getOrThrow(yield* outbox.get("adopted-start"));
+      assert.equal(adopted.status, "succeeded");
+      assert.equal(adopted.attemptCount, 0);
+      assert.equal(
+        Option.getOrThrow(yield* outbox.claimNext({ workerId: "new-core" })).id,
+        "later-work",
+      );
     }).pipe(
       Effect.provide(
         EffectOutbox.layer.pipe(

@@ -8,6 +8,7 @@ import * as NodeChildProcess from "node:child_process";
 import * as NodeStream from "@effect/platform-node/NodeStream";
 import * as PlatformCrypto from "@effect/platform-node/NodeCrypto";
 import {
+  EnvironmentId,
   ProviderDriverKind,
   OrchestrationV2ProviderThread,
   ProviderInstanceId,
@@ -31,6 +32,8 @@ import * as Stream from "effect/Stream";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
 import * as ProviderSessionHost from "./ProviderSessionHost.ts";
+import type { McpCredentialSnapshot } from "../mcp/McpCredentialSnapshot.ts";
+import * as ProviderMcpIngress from "./ProviderMcpIngress.ts";
 import * as ProviderSessionJournal from "./ProviderSessionJournal.ts";
 import * as ProviderSessionTransport from "./ProviderSessionTransport.ts";
 import * as ProviderSessionRemoteRuntime from "./ProviderSessionRemoteRuntime.ts";
@@ -228,14 +231,38 @@ it.live(
           ProviderSessionTransport.layerServer.pipe(
             Layer.provide(Layer.succeed(ProviderSessionHost.ProviderSessionHost, host)),
             Layer.provide(McpProviderSessions.layer),
+            Layer.provide(ProviderMcpIngress.layer),
             Layer.provide(Layer.succeed(ProviderSessionTransport.HostTransportConfig, config)),
           ),
         );
         const clientLayer = ProviderSessionTransport.layerClient.pipe(
           Layer.provide(Layer.succeed(ProviderSessionTransport.HostTransportConfig, config)),
         );
+        const credentials: ReadonlyArray<McpCredentialSnapshot> = [
+          {
+            tokenHash: "a".repeat(64),
+            environmentId: EnvironmentId.make("fixture"),
+            requestNamespace: "mcp-fixture",
+            thread: {
+              threadId: input.threadId,
+              providerSessionId: "mcp-fixture",
+              providerInstanceId: instanceId,
+              subagent: true,
+            },
+            capabilities: ["orchestration"],
+            issuedAt: 1000,
+            lastAliveAt: 1010,
+          },
+        ];
         const firstConnection = yield* Effect.gen(function* () {
           const client = yield* ProviderSessionTransport.ProviderSessionClient;
+          yield* client["mcp.checkpoint"]({ credentials });
+          const ingressStatus = yield* client["mcp.status"]({});
+          assert.isTrue(ingressStatus.state.paused);
+          yield* client["mcp.route"]({ endpoint: "http://127.0.0.1:1/mcp" });
+          assert.isFalse((yield* client["mcp.status"]({})).state.paused);
+          yield* client["mcp.pause"]({});
+          yield* client["mcp.drain"]({});
           const entries = yield* client["session.list"]({});
           assert.deepEqual(entries[0]!.providerSession.createdAt, now);
           const attached = yield* client["session.attach"]({ sessionId, lease: second.lease });
@@ -295,6 +322,7 @@ it.live(
         yield* emit(event);
         yield* Effect.gen(function* () {
           const client = yield* ProviderSessionTransport.ProviderSessionClient;
+          assert.deepEqual(yield* client["mcp.credentials"]({}), credentials);
           const current = (yield* client["session.list"]({}))[0]!;
           const attached = yield* client["session.attach"]({ sessionId, lease: current.lease });
           yield* Deferred.succeed(probeFinish, undefined);

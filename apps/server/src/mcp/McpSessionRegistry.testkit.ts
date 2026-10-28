@@ -7,6 +7,8 @@ import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 export const layer = Layer.succeed(
   McpSessionRegistry.McpSessionRegistry,
   McpSessionRegistry.McpSessionRegistry.of({
+    checkpoint: Effect.succeed([]),
+    restore: () => Effect.void,
     issue: ({ threadId, providerInstanceId }) =>
       Effect.succeed({
         config: {

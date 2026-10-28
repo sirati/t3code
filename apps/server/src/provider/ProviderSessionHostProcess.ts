@@ -10,6 +10,7 @@ import * as ProviderSessionHost from "./ProviderSessionHost.ts";
 import * as ProviderMcpIngress from "./ProviderMcpIngress.ts";
 import * as ProviderSessionJournal from "./ProviderSessionJournal.ts";
 import * as ProviderSessionTransport from "./ProviderSessionTransport.ts";
+import { BackendDaemonReady } from "../backendDaemonReady.ts";
 
 const journal = ProviderSessionJournal.layer.pipe(
   Layer.provide(
@@ -36,4 +37,6 @@ const layer = Layer.merge(
   Layer.provide(ProviderContinuationRequests.layer),
 );
 
-export const run = Layer.launch(layer);
+export const run = Layer.launch(
+  layer.pipe(Layer.tap(() => Effect.flatMap(BackendDaemonReady, (ready) => ready))),
+);

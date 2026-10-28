@@ -9,6 +9,8 @@ import * as CliError from "effect/cli/CliError";
 import * as ServerConfig from "../config.ts";
 import * as ProviderHostDescriptor from "../provider/ProviderHostDescriptor.ts";
 import * as ProviderPrivateTransport from "../provider/ProviderPrivateTransport.ts";
+import { BackendDaemonReady } from "../backendDaemonReady.ts";
+import { reportReady, stopRequested } from "./backendDaemonReady.ts";
 import { awaitLauncherLoss } from "../launcherWatch.ts";
 import { runServer } from "../server.ts";
 import { type CliServerFlags, resolveServerConfig, sharedServerCommandFlags } from "./config.ts";
@@ -41,7 +43,11 @@ const runServerCommand = Effect.fn("server.runServerCommand")(function* (
         userMessage: "Provider handover is available only for the headless backend daemon.",
       });
     const transport = yield* ProviderHostDescriptor.read(options.providerHostDescriptorFile);
-    run = run.pipe(Effect.provideService(ProviderPrivateTransport.HostTransportConfig, transport));
+    run = run.pipe(
+      Effect.provideService(ProviderPrivateTransport.HostTransportConfig, transport),
+      Effect.provideService(BackendDaemonReady, reportReady("backend")),
+      Effect.raceFirst(stopRequested.pipe(Effect.andThen(Effect.interrupt))),
+    );
   }
   if (config.mode !== "desktop" || config.desktopBootstrapToken === undefined) return yield* run;
   yield* Effect.sync(() => {

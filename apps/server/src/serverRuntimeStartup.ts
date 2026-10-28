@@ -28,6 +28,7 @@ import * as HttpServer from "effect/http/HttpServer";
 import * as NetAddress from "effect/net/NetAddress";
 
 import * as ServerConfig from "./config.ts";
+import { BackendDaemonReady } from "./backendDaemonReady.ts";
 import * as ServiceLauncherClient from "./cloud/serviceLauncherClient.ts";
 import { flushCompileCache } from "./compileCache.ts";
 import * as Keybindings from "./keybindings.ts";
@@ -708,6 +709,7 @@ const make = Effect.fn("serverRuntimeStartup.make")(function* (options?: Startup
       }),
     );
     yield* Effect.logDebug("startup phase: complete");
+    yield* yield* BackendDaemonReady;
     yield* flushCompileCache;
   }).pipe(
     Effect.withSpan("server.startup", {

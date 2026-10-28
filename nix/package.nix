@@ -8,6 +8,7 @@
   lib,
   libicns,
   libsecret,
+  libxkbcommon,
   makeBinaryWrapper,
   makeDesktopItem,
   node-gyp,
@@ -215,6 +216,9 @@ stdenv.mkDerivation (
     '';
 
     postFixup = lib.optionalString stdenv.hostPlatform.isLinux ''
+      for module in "$out"/libexec/t3code/node_modules/.pnpm/@crowecawcaw+xa11y-linux-${stdenv.hostPlatform.node.arch}-gnu@*/node_modules/@crowecawcaw/xa11y-linux-${stdenv.hostPlatform.node.arch}-gnu/*.node; do
+        patchelf --add-rpath ${lib.makeLibraryPath [ libxkbcommon stdenv.cc.cc.lib ]} "$module"
+      done
       # Electron's Node runtime does not provide libstdc++ for the bundled node-pty prebuild
       for module in "$out"/libexec/t3code/node_modules/.pnpm/node-pty@*/node_modules/node-pty/prebuilds/linux-${stdenv.hostPlatform.node.arch}/pty.node; do
         patchelf --add-rpath ${lib.makeLibraryPath [ stdenv.cc.cc.lib ]} "$module"

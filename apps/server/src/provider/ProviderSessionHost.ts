@@ -43,6 +43,7 @@ export const HostedProviderSession = Schema.Struct({
   backgroundTasksEndWithProcess: Schema.Boolean,
   methods: Schema.Array(Schema.String),
   lastTerminals: Schema.Array(ProviderAdapter.ProviderAdapterV2TerminalEvent),
+  runConsumers: Schema.Array(ProviderAdapter.ProviderAdapterV2RunConsumer),
 });
 export type HostedProviderSession = typeof HostedProviderSession.Type;
 
@@ -77,6 +78,12 @@ export class ProviderSessionHost extends Context.Service<
       lease: string,
       through: number,
     ) => Effect.Effect<void, ProviderSessionHostError>;
+    readonly setRunConsumer: (
+      sessionId: ProviderSessionId,
+      lease: string,
+      consumer: ProviderAdapter.ProviderAdapterV2RunConsumer,
+      retained: boolean,
+    ) => Effect.Effect<void, ProviderSessionHostError>;
     readonly close: (
       sessionId: ProviderSessionId,
       lease: string,
@@ -97,6 +104,7 @@ interface HostedSession {
   ended: boolean;
   failure: unknown;
   lastTerminals: Map<ProviderThreadId, ProviderAdapter.ProviderAdapterV2TerminalEvent>;
+  runConsumers: Map<string, ProviderAdapter.ProviderAdapterV2RunConsumer>;
 }
 
 function describe(entry: HostedSession): HostedProviderSession {
@@ -109,6 +117,7 @@ function describe(entry: HostedSession): HostedProviderSession {
     attached: entry.attached,
     ended: entry.ended,
     lastTerminals: [...entry.lastTerminals.values()],
+    runConsumers: [...entry.runConsumers.values()],
     backgroundTasksEndWithProcess: entry.runtime.backgroundTasksEndWithProcess === true,
     methods: [
       ...Object.keys(entry.runtime).filter(
@@ -208,6 +217,7 @@ const make = Effect.gen(function* () {
             ended: false,
             failure: undefined,
             lastTerminals: new Map(),
+            runConsumers: new Map(),
           };
           sessions.set(input.providerSessionId, entry);
           yield* runtime.events.pipe(
@@ -357,6 +367,21 @@ const make = Effect.gen(function* () {
     (effect, sessionId) => lock.withLock(sessionId, effect),
   );
 
+  const setRunConsumer = Effect.fn("ProviderSessionHost.setRunConsumer")(
+    function* (
+      sessionId: ProviderSessionId,
+      lease: string,
+      consumer: ProviderAdapter.ProviderAdapterV2RunConsumer,
+      retained: boolean,
+    ) {
+      const entry = yield* requireSession(sessionId, lease);
+      const key = `${consumer.runId.length}:${consumer.runId}:${consumer.attemptId}`;
+      if (retained) entry.runConsumers.set(key, consumer);
+      else entry.runConsumers.delete(key);
+    },
+    (effect, sessionId) => lock.withLock(sessionId, effect),
+  );
+
   const close = Effect.fn("ProviderSessionHost.close")(
     function* (sessionId: ProviderSessionId, lease: string) {
       const entry = yield* requireSession(sessionId, lease);
@@ -374,6 +399,7 @@ const make = Effect.gen(function* () {
   );
 
   return ProviderSessionHost.of({
+    setRunConsumer,
     open,
     list: Effect.sync(() => [...sessions.values()].map(describe)),
     attach,

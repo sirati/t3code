@@ -6786,6 +6786,12 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
     "stop",
     "stop-before-arm",
     "stop-before-arm-mismatched-recovery",
+    "proxy-available",
+    "proxy-no-reset",
+    "proxy-stale-reset",
+    "proxy-stop",
+    "proxy-manual-race",
+    "proxy-timer-race",
   ] as const)("guards a scheduled usage-limit continuation against %s", (scenario) =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -6883,7 +6889,13 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
                 message: "Plan limit reached.",
                 code: "usageLimitExceeded",
                 retryable: null,
-                resetAt,
+                resetAt:
+                  scenario === "proxy-no-reset"
+                    ? null
+                    : scenario === "proxy-stale-reset"
+                      ? DateTime.formatIso(now)
+                      : resetAt,
+                ...(scenario.startsWith("proxy-") ? { proxyRecoveryId: "K5wVx3M9Sq1zAx7B" } : {}),
               },
             },
           },
@@ -6916,6 +6928,60 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
       const shell = (yield* orchestrator.getShellSnapshot()).threads.find(
         (thread) => thread.id === threadId,
       )!;
+      if (scenario.startsWith("proxy-")) {
+        assert.equal(shell.proxyRecoveryId, "K5wVx3M9Sq1zAx7B");
+        const arm = limitRecoveryCommand(shell, true, DateTime.toEpochMillis(now))!;
+        yield* orchestrator.dispatch(arm);
+        const armed = (yield* orchestrator.getShellSnapshot()).threads.find(
+          (thread) => thread.id === threadId,
+        )!;
+        assert.isNull(limitRecoveryCommand(armed, true, DateTime.toEpochMillis(now)));
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const candidates = yield* projections.getLimitRecoveryCandidates({
+          now,
+          autoResume: true,
+          snooze: false,
+        });
+        assert.isTrue(candidates.some((candidate) => candidate.id === threadId));
+        const available = limitRecoveryCommand(
+          armed,
+          true,
+          DateTime.toEpochMillis(now),
+          false,
+          true,
+        )!;
+        assert.equal((yield* orchestrator.getThreadProjection(threadId)).runs.length, 1);
+        if (scenario === "proxy-stop") {
+          yield* orchestrator.dispatch({
+            type: "thread.stop",
+            commandId: CommandId.make("proxy:stop"),
+            threadId,
+          });
+        } else if (scenario === "proxy-manual-race") {
+          yield* orchestrator.dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make("proxy:manual"),
+            messageId: MessageId.make("proxy:manual"),
+            threadId,
+            manualContinuationOfRunId: run.id,
+            text: "Continue",
+            attachments: [],
+            dispatchMode: { type: "start_immediately" },
+            createdBy: "user",
+            creationSource: "web",
+          });
+        } else if (scenario === "proxy-timer-race") {
+          yield* TestClock.adjust("1 minute");
+          const timer = limitRecoveryCommand(armed, true, Date.parse(resetAt))!;
+          assert.equal(timer.commandId, available.commandId);
+          yield* orchestrator.dispatch(timer);
+        }
+        yield* orchestrator.dispatch(available);
+        yield* orchestrator.dispatch(available);
+        const resumed = yield* orchestrator.getThreadProjection(threadId);
+        assert.equal(resumed.runs.length, scenario === "proxy-stop" ? 1 : 2);
+        return;
+      }
       assert.isNull(limitRecoveryCommand(shell, false, DateTime.toEpochMillis(now)));
       if (scenario === "invalid-snooze") {
         const result = yield* orchestrator

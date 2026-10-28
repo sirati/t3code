@@ -252,13 +252,19 @@ export function useThreadLifecycle(input: ThreadLifecycleInput) {
       recovery?.snooze === true &&
       recovery.runId === activeThreadShell?.latestRun?.runId &&
       activeThreadShell?.snoozedUntil != null &&
+      recovery.resetAt !== null &&
       Date.parse(activeThreadShell.snoozedUntil) === Date.parse(recovery.resetAt);
     const result = recoveryOwnsSnooze
       ? await updateThreadMetadata({
           environmentId: activeThreadRef.environmentId,
           input: {
             threadId: activeThreadRef.threadId,
-            limitRecovery: { runId: recovery.runId, resetAt: recovery.resetAt, snooze: false },
+            limitRecovery: {
+              runId: recovery.runId,
+              resetAt: recovery.resetAt,
+              proxyRecoveryId: recovery.proxyRecoveryId,
+              snooze: false,
+            },
           },
         })
       : await unsnoozeThreadMutation({

@@ -22,9 +22,11 @@ export function UsageLimitRecoveryCard({
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const resetAt = thread.runtime?.usageLimitResetAt ?? null;
+  const proxyRecoveryId = thread.runtime?.proxyRecoveryId;
   const canSchedule =
-    resetAt !== null &&
-    Date.parse(resetAt) > Date.parse(thread.latestRun?.completedAt ?? thread.updatedAt);
+    Boolean(proxyRecoveryId) ||
+    (resetAt !== null &&
+      Date.parse(resetAt) > Date.parse(thread.latestRun?.completedAt ?? thread.updatedAt));
   const resetPassed = useDeadlinePassed(resetAt === null ? null : Date.parse(resetAt));
   const runId = thread.latestRun?.runId;
   const recovery = thread.limitRecovery;
@@ -44,8 +46,8 @@ export function UsageLimitRecoveryCard({
     thread.snoozedUntil !== null &&
     Date.parse(thread.snoozedUntil) === Date.parse(resetAt);
   async function toggle(action: "resume" | "snooze") {
-    if (!resetAt || !runId || !canSchedule) return;
-    if (action === "snooze" && !snoozed && Date.parse(resetAt) <= Date.now()) {
+    if (!runId || !canSchedule || (!resetAt && action === "snooze")) return;
+    if (action === "snooze" && resetAt !== null && !snoozed && Date.parse(resetAt) <= Date.now()) {
       setError("The reset time has passed. Retry the thread manually.");
       return;
     }
@@ -58,6 +60,7 @@ export function UsageLimitRecoveryCard({
         limitRecovery: {
           runId,
           resetAt,
+          ...(proxyRecoveryId ? { proxyRecoveryId } : {}),
           ...(action === "resume" ? { autoResume: !scheduled } : { snooze: !snoozed }),
         },
       },
@@ -73,12 +76,20 @@ export function UsageLimitRecoveryCard({
       <Text className="text-sm text-warning-foreground">
         {resetAt
           ? `Usage limit resets ${DateTime.toDateUtc(DateTime.makeUnsafe(resetAt)).toLocaleString()}.`
-          : "The provider did not report a reset time. Retry manually when your limit is available."}
+          : proxyRecoveryId
+            ? "Waiting for provider availability."
+            : "The provider did not report a reset time. Retry manually when your limit is available."}
       </Text>
       {canSchedule ? (
         <View className="flex-row flex-wrap gap-2">
           <Button
-            label={scheduled ? "Cancel auto-resume" : "Resume at reset"}
+            label={
+              scheduled
+                ? "Cancel auto-resume"
+                : proxyRecoveryId
+                  ? "Resume when available"
+                  : "Resume at reset"
+            }
             tone="secondary"
             disabled={pending}
             onPress={() => void toggle("resume")}
@@ -86,7 +97,7 @@ export function UsageLimitRecoveryCard({
           <Button
             label={snoozed ? "Wake now" : "Snooze until reset"}
             tone="secondary"
-            disabled={pending || (!snoozed && resetPassed)}
+            disabled={pending || resetAt === null || (!snoozed && resetPassed)}
             onPress={() => void toggle("snooze")}
           />
         </View>

@@ -46,6 +46,10 @@ export const ProviderSessionRpc = RpcGroup.make(
     payload: Schema.Struct({ credentials: Schema.Array(McpCredentialSnapshot) }),
     success: Schema.Void,
   }),
+  Rpc.make("mcp.configurations", {
+    payload: Schema.Struct({}),
+    success: Schema.Array(mcpConfig),
+  }),
   Rpc.make("mcp.credentials", {
     payload: Schema.Struct({}),
     success: Schema.Array(McpCredentialSnapshot),
@@ -129,6 +133,15 @@ export const layer = ProviderSessionRpc.toLayer(
           credentials = request.credentials;
         }),
       "mcp.credentials": () => Effect.sync(() => credentials),
+      "mcp.configurations": () =>
+        mcp.snapshot.pipe(
+          Effect.map((configs) =>
+            configs.map((config) => ({
+              ...config,
+              capabilities: [...(config.capabilities ?? [])],
+            })),
+          ),
+        ),
       "mcp.status": () =>
         Effect.map(ingress.snapshot, (state) => ({ endpoint: ingress.endpoint, state })),
       "mcp.route": ({ endpoint }) => ingress.route(endpoint),

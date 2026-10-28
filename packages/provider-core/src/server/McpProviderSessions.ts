@@ -30,6 +30,7 @@ const hashHtml = (html: string) => NodeCrypto.createHash("sha256").update(html).
 export class McpProviderSessions extends Context.Service<
   McpProviderSessions,
   {
+    readonly snapshot: Effect.Effect<ReadonlyArray<McpProviderSessionConfig>>;
     readonly set: (config: McpProviderSessionConfig) => Effect.Effect<void>;
     readonly read: (threadId: ThreadId) => Effect.Effect<McpProviderSessionConfig | undefined>;
     readonly clear: (threadId: ThreadId) => Effect.Effect<void>;
@@ -81,6 +82,7 @@ const make = Effect.gen(function* () {
   const sessions = yield* Ref.make(new Map<ThreadId, McpProviderSessionConfig>());
   const htmlRenders = yield* Ref.make(new Map<ThreadId, ReadonlyArray<KeptHtmlRender>>());
   return McpProviderSessions.of({
+    snapshot: Ref.get(sessions).pipe(Effect.map((current) => [...current.values()])),
     set: Effect.fn("McpProviderSessions.set")(function* (config) {
       const current = yield* Ref.get(sessions);
       if (current.get(config.threadId)?.providerSessionId !== config.providerSessionId) {

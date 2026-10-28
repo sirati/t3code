@@ -3882,6 +3882,22 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
   );
   yield* stageClerkPasskeyNativeBinaries(stageAppDir, options.platform, options.arch);
   yield* stageKeyringNativeBinaries(stageAppDir, options.platform, options.arch);
+  yield* runCommand(
+    ChildProcess.make(
+      "node",
+      [
+        path.join(repoRoot, "apps/desktop/scripts/build-dictation-api.mjs"),
+        "--package-root",
+        path.join(stageAppDir, "node_modules/@dictation-api/client"),
+        "--platform",
+        options.platform,
+        "--arch",
+        options.arch,
+      ],
+      { cwd: repoRoot },
+    ),
+    { label: "Build staged dictation addon", verbose: options.verbose },
+  );
 
   if (options.platform === "win" && windowsServerAsarPath) {
     yield* stageWindowsServerSidecar({

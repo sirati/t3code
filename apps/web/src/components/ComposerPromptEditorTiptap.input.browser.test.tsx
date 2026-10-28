@@ -17,6 +17,7 @@ import { act, fakeTimers, render } from "../../test/render";
 
 import { serializeEditorDoc } from "~/composer-rich-text-doc";
 import { isMacPlatform } from "~/lib/utils";
+import { captureDictationTarget } from "../lib/dictationTargets";
 import {
   ComposerPromptEditor,
   type ComposerPromptEditorHandle,
@@ -436,4 +437,70 @@ describe("an Arabic line", () => {
       box.left + box.width / 2,
     );
   });
+});
+
+it("dictates into the captured composer selection and submits its original form after focus moves", async () => {
+  const changed = vi.fn();
+  const submitted = vi.fn((event: React.FormEvent) => event.preventDefault());
+  await using screen = await render(
+    <>
+      <form onSubmit={submitted}>{composer("hello world", true, [], changed)}</form>
+      <input aria-label="unrelated input" />
+    </>,
+  );
+  const editor = editorIn(screen.container);
+  editor.commands.setTextSelection({ from: 7, to: 12 });
+  editor.view.dom.focus();
+  const target = captureDictationTarget(document)!;
+  const unrelated = screen
+    .getByRole("textbox", { name: "unrelated input" })
+    .element() as HTMLInputElement;
+  unrelated.focus();
+  expect(target.apply("dictation", true)).toBe(true);
+  expect(editor.getText()).toBe("hello dictation");
+  expect(changed.mock.lastCall?.[0]).toBe("hello dictation");
+  expect(submitted).toHaveBeenCalledOnce();
+  expect(document.activeElement).toBe(unrelated);
+  target.dispose();
+});
+
+it("does not redirect dictation into a different conversation after the original editor unmounts", async () => {
+  const props = {
+    contextRecords: new Map(),
+    skills: [],
+    disabled: false,
+    placeholder: "",
+    editorRef: createRef<ComposerPromptEditorHandle>(),
+    onChange: vi.fn(),
+    onPaste: () => {},
+  };
+  await using screen = await render(
+    <ComposerPromptEditor
+      {...props}
+      draftKey="original-thread"
+      value="original draft"
+      cursor={8}
+    />,
+  );
+  const original = editorIn(screen.container);
+  original.view.dom.focus();
+  const target = captureDictationTarget(document)!;
+  await screen.rerender(
+    <ComposerPromptEditor
+      {...props}
+      draftKey="different-thread"
+      value="different draft"
+      cursor={0}
+    />,
+  );
+  expect(target.apply("late transcript", true)).toBe(false);
+  expect(editorIn(screen.container).getText()).toBe("different draft");
+  expect(props.onChange).not.toHaveBeenCalledWith(
+    expect.stringContaining("late transcript"),
+    expect.anything(),
+    expect.anything(),
+    expect.anything(),
+    expect.anything(),
+  );
+  target.dispose();
 });

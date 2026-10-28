@@ -13,6 +13,7 @@ import * as ElectronProtocol from "../electron/ElectronProtocol.ts";
 import * as ElectronSafeStorage from "../electron/ElectronSafeStorage.ts";
 import { installDesktopIpcHandlers } from "../ipc/DesktopIpcHandlers.ts";
 import * as DesktopAppActivation from "./DesktopAppActivation.ts";
+import * as DesktopDictation from "./DesktopDictation.ts";
 import * as DesktopAppIdentity from "./DesktopAppIdentity.ts";
 import * as DesktopClerk from "./DesktopClerk.ts";
 import * as DesktopApplicationMenu from "../window/DesktopApplicationMenu.ts";
@@ -178,6 +179,7 @@ const bootstrap = Effect.gen(function* () {
     clerkFrontendApiHostname: DesktopClerk.desktopClerkFrontendApiHostname,
   });
   yield* installDesktopIpcHandlers();
+  yield* DesktopDictation.start();
   yield* logBootstrapInfo("bootstrap ipc handlers registered");
   // Before any window: the preload merges these items before the app reads storage.
   yield* (yield* DesktopLegacyLocalStorage.DesktopLegacyLocalStorage).load(

@@ -51,6 +51,7 @@ import {
   type RefObject,
 } from "react";
 import { EditorContent, useEditor } from "@tiptap/react";
+import { registerDictationTiptap } from "../lib/dictationTiptap";
 
 import {
   clampCollapsedComposerCursor,
@@ -1451,6 +1452,12 @@ function ComposerPromptEditorTiptapInner(
   useEffect(() => {
     editor?.setEditable(!disabled);
   }, [disabled, editor]);
+
+  // oxlint-disable-next-line t3code/react-effect-budget -- The broker captures this editor's selection when dictation starts.
+  useLayoutEffect(() => {
+    if (!editor) return;
+    return registerDictationTiptap(editor);
+  }, [editor]);
 
   // Push attributes before layout measurements; Tiptap updates them later in a passive effect.
   useLayoutEffect(() => {

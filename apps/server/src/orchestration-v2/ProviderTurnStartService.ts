@@ -112,6 +112,7 @@ const refusedBeforePrompt = (error: unknown): boolean =>
 
 export interface ProviderTurnStartServiceV2Shape {
   readonly adopt: (input: {
+    readonly consumerReady?: Effect.Effect<void>;
     readonly attemptId?: OrchestrationV2RunAttempt["id"];
     readonly threadId: ThreadId;
     readonly runId: RunId;
@@ -1711,7 +1712,8 @@ export const layer: Layer.Layer<
               .map((turn) => turn.ordinal),
           ),
           adoptExistingTurn: {
-            ...(input.session.eventDelivery?.awaitTurnStart === undefined
+            ...(input.consumerReady === undefined ? {} : { consumerReady: input.consumerReady }),
+            ...(terminal !== undefined || input.session.eventDelivery?.awaitTurnStart === undefined
               ? {}
               : {
                   awaitStartup: input.session.eventDelivery.awaitTurnStart(

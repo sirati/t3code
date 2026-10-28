@@ -562,6 +562,7 @@ export interface RunExecutionServiceV2StartRootRunInput {
   readonly attemptId: RunAttemptId;
   readonly providerTurnOrdinal: number;
   readonly adoptExistingTurn?: {
+    readonly consumerReady?: Effect.Effect<void>;
     readonly awaitStartup?: Effect.Effect<void, ProviderAdapter.ProviderAdapterV2Error>;
     readonly lifecycleEvents: ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>;
   };
@@ -1779,6 +1780,7 @@ export const layer: Layer.Layer<
           );
         });
         if (input.adoptExistingTurn !== undefined) {
+          yield* input.adoptExistingTurn.consumerReady ?? Effect.void;
           yield* (input.adoptExistingTurn.awaitStartup ?? Effect.void).pipe(
             Effect.tap(() => keepMcpCredentialAlive),
             Effect.catchCause((cause) => onStartFailure(cause, "provider_error")),

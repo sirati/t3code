@@ -262,6 +262,7 @@ it.each([
 });
 
 function makeLocalCommandHarness(input: {
+  readonly adoption?: boolean;
   readonly text: string;
   readonly worktreePath?: string;
   readonly worktreesDir?: string;
@@ -621,11 +622,13 @@ function makeLocalCommandHarness(input: {
   const startRootRun = vi.fn<
     (input: RunExecutionService.RunExecutionServiceV2StartRootRunInput) => Effect.Effect<void>
   >(() =>
-    input.failReadsAfterRunning === true || input.previousTurn !== undefined
-      ? Effect.suspend(() =>
-          providerBusy ? Effect.die("The previous provider turn is still running.") : Effect.void,
-        )
-      : Effect.die("A local command must not start a native turn."),
+    input.adoption === true
+      ? Effect.void
+      : input.failReadsAfterRunning === true || input.previousTurn !== undefined
+        ? Effect.suspend(() =>
+            providerBusy ? Effect.die("The previous provider turn is still running.") : Effect.void,
+          )
+        : Effect.die("A local command must not start a native turn."),
   );
   const failReadIfRunning = Effect.suspend(() =>
     input.failReadsAfterRunning === true &&
@@ -717,6 +720,7 @@ function makeLocalCommandHarness(input: {
         }),
         Layer.mock(ProjectionStore.ProjectionStoreV2)({
           getThreadRecords,
+          getThreadProjection: () => Effect.succeed(projection),
           getTurnStartContext,
           getRuntimeRecoveryProjection: () =>
             Effect.as(failReadIfRunning, {
@@ -757,6 +761,17 @@ function makeLocalCommandHarness(input: {
     ),
   );
   return {
+    adopt: Effect.gen(function* () {
+      yield* (yield* ProviderTurnStart.ProviderTurnStartServiceV2).adopt({
+        threadId,
+        runId,
+        session: {
+          instanceId: newInstanceId,
+          driver: providerThread.driver,
+          providerSessionId,
+        } as ProviderAdapter.ProviderAdapterV2SessionRuntime,
+      });
+    }).pipe(Effect.provide(layer)),
     getThreadRecords,
     getTurnStartContext,
     setProjection: (next: OrchestrationV2ThreadProjection) => {
@@ -786,6 +801,49 @@ function makeLocalCommandHarness(input: {
     }).pipe(Effect.provide(layer)),
   };
 }
+
+effectIt.effect(
+  "adopts an accepted turn without rewriting its state or opening another provider",
+  () =>
+    Effect.gen(function* () {
+      const harness = makeLocalCommandHarness({ text: "keep running", adoption: true });
+      const before = harness.projection();
+      harness.setProjection({
+        ...before,
+        runs: before.runs.map((run) => ({ ...run, status: "running" })),
+      });
+      yield* harness.adopt;
+      expect(harness.open).not.toHaveBeenCalled();
+      expect(harness.tryHandlePromptCommand).not.toHaveBeenCalled();
+      expect(harness.events).toEqual([]);
+      const adopted = harness.startRootRun.mock.calls[0]![0];
+      expect(adopted.run.status).toBe("running");
+      expect(adopted.attempt.id).toBe(harness.attemptId);
+      expect(adopted.adoptExistingTurn).toBeDefined();
+      expect(
+        adopted.adoptExistingTurn!.lifecycleEvents.some(
+          (event) => event.type === "provider_thread.updated",
+        ),
+      ).toBe(true);
+      expect(yield* adopted.shouldFinalizeRun!()).toBe(true);
+      const current = harness.projection();
+      harness.setProjection({
+        ...current,
+        runs: current.runs.map((run) => ({
+          ...run,
+          activeAttemptId: RunAttemptId.make("replacement-attempt"),
+        })),
+      });
+      expect(yield* adopted.shouldFinalizeRun!()).toBe(false);
+      harness.setProjection({
+        ...current,
+        runs: current.runs.map((run) => ({ ...run, status: "completed" })),
+      });
+      const rejected = yield* harness.adopt.pipe(Effect.result);
+      expect(rejected._tag).toBe("Failure");
+      expect(harness.startRootRun).toHaveBeenCalledTimes(1);
+    }),
+);
 
 effectIt.effect(
   "recovers the thread branch tip, falls back to the current project branch, and rejects detached HEAD",

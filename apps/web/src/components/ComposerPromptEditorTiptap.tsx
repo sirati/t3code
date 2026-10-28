@@ -50,6 +50,7 @@ import {
   type RefObject,
 } from "react";
 import { EditorContent, useEditor } from "@tiptap/react";
+import { registerDictationTiptap } from "../lib/dictationTiptap";
 
 import {
   clampCollapsedComposerCursor,
@@ -1449,6 +1450,12 @@ function ComposerPromptEditorTiptapInner(
   useEffect(() => {
     editor?.setEditable(!disabled);
   }, [disabled, editor]);
+
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Register the mounted editor with the dictation target registry until unmount.
+  useLayoutEffect(() => {
+    if (!editor) return;
+    return registerDictationTiptap(editor);
+  }, [editor]);
 
   // Push attributes before layout measurements; Tiptap updates them later in a passive effect.
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- pushes DOM attributes into the ProseMirror view before layout measurements read them

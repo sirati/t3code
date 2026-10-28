@@ -1003,6 +1003,17 @@ export const SystemSettingsPaneSchema = Schema.Literals(["full-disk-access"]);
 export type SystemSettingsPane = typeof SystemSettingsPaneSchema.Type;
 
 export interface DesktopBridge {
+  dictation?: {
+    onEvent: (
+      listener: (
+        event:
+          | { kind: "offer" | "cancelled"; session: string }
+          | { kind: "transcript"; session: string; text: string; submit: boolean },
+      ) => void,
+    ) => () => void;
+    respond: (session: string, accept: boolean) => Promise<void>;
+    acknowledge: (session: string, applied: boolean, error: string | null) => Promise<void>;
+  };
   getAppBranding: () => DesktopAppBranding | null;
   getRelayTelemetryEnabled: () => boolean;
   getPathForFile: (file: File) => string;

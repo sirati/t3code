@@ -73,6 +73,44 @@ function unwrapEnsureSshEnvironmentResult(result: unknown) {
 }
 
 contextBridge.exposeInMainWorld("desktopBridge", {
+  dictation: {
+    onEvent: (listener) => {
+      const handler = (_event: Electron.IpcRendererEvent, value: unknown) => {
+        if (
+          typeof value !== "object" ||
+          value === null ||
+          !("kind" in value) ||
+          !("session" in value) ||
+          typeof value.session !== "string"
+        )
+          return;
+        if (value.kind === "offer" || value.kind === "cancelled")
+          listener({ kind: value.kind, session: value.session });
+        else if (
+          value.kind === "transcript" &&
+          "text" in value &&
+          typeof value.text === "string" &&
+          "submit" in value &&
+          typeof value.submit === "boolean"
+        )
+          listener({
+            kind: "transcript",
+            session: value.session,
+            text: value.text,
+            submit: value.submit,
+          });
+      };
+      ipcRenderer.on("dictation:event", handler);
+      ipcRenderer.send("dictation:listen");
+      return () => {
+        ipcRenderer.removeListener("dictation:event", handler);
+        ipcRenderer.send("dictation:unlisten");
+      };
+    },
+    respond: (session, accept) => ipcRenderer.invoke("dictation:respond", session, accept),
+    acknowledge: (session, applied, error) =>
+      ipcRenderer.invoke("dictation:acknowledge", session, applied, error),
+  },
   getAppBranding: () => {
     const result = ipcRenderer.sendSync(IpcChannels.GET_APP_BRANDING_CHANNEL);
     if (typeof result !== "object" || result === null) {

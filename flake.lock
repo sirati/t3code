@@ -1,0 +1,68 @@
+{
+  "nodes": {
+    "dictation-api": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ],
+        "nixpkgs-darwin-intel": [
+          "nixpkgs-darwin-intel"
+        ]
+      },
+      "locked": {
+        "lastModified": 1793157141,
+        "narHash": "sha256-kJU5cXKYHC7grvzajgwCavFKMKzOio7QjjjnMv4ftVE=",
+        "owner": "sirati",
+        "repo": "dictation-api",
+        "rev": "c86db0fc9d68bae526b7b6d0c0857c0d85250ee6",
+        "type": "github"
+      },
+      "original": {
+        "owner": "sirati",
+        "repo": "dictation-api",
+        "type": "github"
+      }
+    },
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1792773339,
+        "narHash": "sha256-rZLrzrC6i+jnTAlvPZHogKDulY7WWDEv9hJeHieO7Zw=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "3ec636362e1816bc2f0888fa0fa2c69f1bc9e504",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixos-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "nixpkgs-darwin-intel": {
+      "locked": {
+        "lastModified": 1792972624,
+        "narHash": "sha256-ry0XgykkfLTK5p8PB68FZC0tJBApel70iRJBjwyIZ/s=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "1e67485f1727d2f653b370efaaac93434ba2899b",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixpkgs-26.05-darwin",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "dictation-api": "dictation-api",
+        "nixpkgs": "nixpkgs",
+        "nixpkgs-darwin-intel": "nixpkgs-darwin-intel"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}

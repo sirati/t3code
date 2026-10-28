@@ -7,6 +7,8 @@ import * as Rpc from "effect/rpc/Rpc";
 import * as RpcGroup from "effect/rpc/RpcGroup";
 import * as RpcMiddleware from "effect/rpc/RpcMiddleware";
 import * as ProviderSessionHost from "./ProviderSessionHost.ts";
+import * as ProviderMcpIngress from "./ProviderMcpIngress.ts";
+import { McpCredentialSnapshot } from "../mcp/McpCredentialSnapshot.ts";
 import { ProviderSessionEnvelope } from "./ProviderSessionJournal.ts";
 import { OpenHostedSessionInput, sessionMethods } from "./ProviderSessionMethods.ts";
 
@@ -41,6 +43,25 @@ const mcpConfig = Schema.Struct({
 });
 
 export const ProviderSessionRpc = RpcGroup.make(
+  Rpc.make("mcp.checkpoint", {
+    payload: Schema.Struct({ credentials: Schema.Array(McpCredentialSnapshot) }),
+    success: Schema.Void,
+  }),
+  Rpc.make("mcp.credentials", {
+    payload: Schema.Struct({}),
+    success: Schema.Array(McpCredentialSnapshot),
+  }),
+  Rpc.make("mcp.status", {
+    payload: Schema.Struct({}),
+    success: Schema.Struct({ endpoint: Schema.String, state: ProviderMcpIngress.IngressSnapshot }),
+  }),
+  Rpc.make("mcp.route", {
+    payload: Schema.Struct({ endpoint: Schema.String }),
+    success: Schema.Void,
+    error: ProviderMcpIngress.ProviderMcpIngressError,
+  }),
+  Rpc.make("mcp.pause", { payload: Schema.Struct({}), success: Schema.Void }),
+  Rpc.make("mcp.drain", { payload: Schema.Struct({}), success: Schema.Void }),
   Rpc.make("session.open", {
     payload: Schema.Struct({
       instanceId: ProviderInstanceId,
@@ -88,15 +109,28 @@ export const ProviderSessionRpc = RpcGroup.make(
 export const layer = ProviderSessionRpc.toLayer(
   Effect.gen(function* () {
     const host = yield* ProviderSessionHost.ProviderSessionHost;
+    const ingress = yield* ProviderMcpIngress.ProviderMcpIngress;
     const mcp = yield* McpProviderSessions.McpProviderSessions;
+    let credentials: ReadonlyArray<McpCredentialSnapshot> = [];
     const configureMcp = (config: typeof mcpConfig.Type) => {
       const { capabilities, ...fields } = config;
       return mcp.set({
         ...fields,
+        endpoint: ingress.endpoint,
         ...(capabilities === undefined ? {} : { capabilities: new Set(capabilities) }),
       });
     };
     return ProviderSessionRpc.of({
+      "mcp.checkpoint": (request) =>
+        Effect.sync(() => {
+          credentials = request.credentials;
+        }),
+      "mcp.credentials": () => Effect.sync(() => credentials),
+      "mcp.status": () =>
+        Effect.map(ingress.snapshot, (state) => ({ endpoint: ingress.endpoint, state })),
+      "mcp.route": ({ endpoint }) => ingress.route(endpoint),
+      "mcp.pause": () => ingress.pause,
+      "mcp.drain": () => ingress.awaitDrained,
       // The RPC middleware owns the request span.
       "session.open": Effect.fnUntraced(function* (request) {
         if (request.mcp) yield* configureMcp(request.mcp);

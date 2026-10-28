@@ -2,11 +2,17 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
+import { McpCredentialSnapshot } from "./McpCredentialSnapshot.ts";
 import { HttpServer } from "effect/http";
 import * as NetAddress from "effect/net/NetAddress";
 
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
+
+const credentialJson = Schema.fromJsonString(Schema.Array(McpCredentialSnapshot));
+const encodeCredentials = Schema.encodeEffect(credentialJson);
+const decodeCredentials = Schema.decodeEffect(credentialJson);
 
 const environmentId = EnvironmentId.make("environment-1");
 const makeFakeHttpServer = (hostname: string, port = 43123) =>
@@ -218,5 +224,56 @@ it.effect.each(["provider-session", "thread", "all"] as const)(
       }[revocation];
       yield* registry.touch(threadId);
       expect(yield* registry.resolve(token)).toBeUndefined();
+    }),
+);
+
+it.effect(
+  "restores the exact token scope and expiry across server replacement without exporting a bearer",
+  () =>
+    Effect.gen(function* () {
+      let timestamp = 1_000;
+      const original = yield* makeRegistry(() => timestamp);
+      const threadId = ThreadId.make("handover-child");
+      const issued = yield* original.issue({
+        threadId,
+        providerInstanceId: ProviderInstanceId.make("claude"),
+        subagent: true,
+        capabilities: new Set(["device"]),
+      });
+      const token = issued.config.authorizationHeader.replace(/^Bearer\s+/, "");
+      const scope = yield* original.resolve(token);
+      const snapshot = yield* original.checkpoint;
+      const json = yield* encodeCredentials(snapshot);
+      expect(json).not.toContain(token);
+      const decoded = yield* decodeCredentials(json);
+      const replacement = yield* makeRegistry(
+        () => timestamp,
+        makeFakeHttpServer("127.0.0.1", 43124),
+      );
+      yield* replacement.restore(decoded);
+      expect(yield* replacement.resolve(token)).toEqual(scope);
+      expect((yield* replacement.resolve(token))?.capabilities.has("preview")).toBe(false);
+      timestamp += 101;
+      const expired = yield* makeRegistry(() => timestamp);
+      yield* expired.restore(decoded);
+      expect(yield* expired.resolve(token)).toBeUndefined();
+      yield* expired.touch(threadId);
+      expect(yield* expired.resolve(token)).toEqual(scope);
+      const foreign = decoded.map((record) => ({
+        ...record,
+        environmentId: EnvironmentId.make("foreign"),
+      }));
+      expect((yield* replacement.restore(foreign).pipe(Effect.result))._tag).toBe("Failure");
+      expect((yield* replacement.restore([...decoded, ...decoded]).pipe(Effect.result))._tag).toBe(
+        "Failure",
+      );
+      const changedNamespace = decoded.map((record) => ({ ...record, requestNamespace: "wrong" }));
+      expect((yield* replacement.restore(changedNamespace).pipe(Effect.result))._tag).toBe(
+        "Failure",
+      );
+      yield* replacement.touch(threadId);
+      expect(yield* replacement.resolve(token)).toEqual(scope);
+      yield* replacement.revokeProviderSession(issued.config.providerSessionId);
+      expect(yield* replacement.resolve(token)).toBeUndefined();
     }),
 );

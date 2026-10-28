@@ -5,6 +5,7 @@ import * as Path from "effect/Path";
 import * as ServerConfig from "../config.ts";
 import { layerProviderSessionInfrastructure } from "../server.ts";
 import * as ProviderSessionHost from "./ProviderSessionHost.ts";
+import * as ProviderMcpIngress from "./ProviderMcpIngress.ts";
 import * as ProviderSessionJournal from "./ProviderSessionJournal.ts";
 import * as ProviderSessionTransport from "./ProviderSessionTransport.ts";
 
@@ -24,6 +25,7 @@ const journal = ProviderSessionJournal.layer.pipe(
 
 const layer = ProviderSessionTransport.layerServer.pipe(
   Layer.provideMerge(ProviderSessionHost.layer.pipe(Layer.provide(journal))),
+  Layer.provide(ProviderMcpIngress.layer),
   Layer.provide(layerProviderSessionInfrastructure),
 );
 

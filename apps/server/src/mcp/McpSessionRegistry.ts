@@ -4,6 +4,8 @@ import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
+import { McpCredentialSnapshot } from "./McpCredentialSnapshot.ts";
 import * as SynchronizedRef from "effect/SynchronizedRef";
 import { HttpServer } from "effect/http";
 import * as NetAddress from "effect/net/NetAddress";
@@ -25,7 +27,20 @@ export interface McpIssuedCredential {
   readonly config: McpProviderSession.McpProviderSessionConfig;
 }
 
+export class McpCredentialRestoreError extends Schema.TaggedError<McpCredentialRestoreError>()(
+  "McpCredentialRestoreError",
+  { reason: Schema.Literals(["environment", "duplicate", "namespace"]) },
+) {
+  override get message() {
+    return "Cannot restore provider MCP credentials.";
+  }
+}
+
 export interface McpSessionRegistryShape {
+  readonly checkpoint: Effect.Effect<ReadonlyArray<McpCredentialSnapshot>>;
+  readonly restore: (
+    snapshot: ReadonlyArray<McpCredentialSnapshot>,
+  ) => Effect.Effect<void, McpCredentialRestoreError>;
   readonly issue: (request: McpCredentialRequest) => Effect.Effect<McpIssuedCredential>;
   readonly resolve: (
     rawToken: string,
@@ -175,6 +190,43 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
     }));
 
   return McpSessionRegistry.of({
+    checkpoint: SynchronizedRef.get(state).pipe(
+      Effect.map(({ records }) =>
+        [...records.values()].map((record) => ({
+          tokenHash: record.tokenHash,
+          environmentId: record.scope.environmentId,
+          requestNamespace: record.scope.requestNamespace,
+          thread: { ...record.scope.thread, subagent: record.scope.thread.subagent === true },
+          capabilities: [...record.scope.capabilities],
+          issuedAt: record.scope.issuedAt,
+          lastAliveAt: record.lastAliveAt,
+        })),
+      ),
+    ),
+    restore: Effect.fn("McpSessionRegistry.restore")(function* (snapshot) {
+      const restored = new Map<string, CredentialRecord>();
+      for (const record of snapshot) {
+        if (record.environmentId !== environmentId)
+          return yield* new McpCredentialRestoreError({ reason: "environment" });
+        if (record.requestNamespace !== record.thread.providerSessionId)
+          return yield* new McpCredentialRestoreError({ reason: "namespace" });
+        if (restored.has(record.tokenHash))
+          return yield* new McpCredentialRestoreError({ reason: "duplicate" });
+        restored.set(record.tokenHash, {
+          tokenHash: record.tokenHash,
+          lastAliveAt: record.lastAliveAt,
+          scope: {
+            environmentId,
+            requestNamespace: record.requestNamespace,
+            thread: record.thread,
+            capabilities: new Set(record.capabilities),
+            client: undefined,
+            issuedAt: record.issuedAt,
+          },
+        });
+      }
+      yield* SynchronizedRef.set(state, { records: restored });
+    }),
     issue,
     resolve,
     touch,

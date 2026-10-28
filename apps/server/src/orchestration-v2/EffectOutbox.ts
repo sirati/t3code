@@ -223,6 +223,8 @@ export interface EffectOutboxV2Shape {
     { readonly requeued: number; readonly cancelled: number },
     EffectOutboxError
   >;
+  /** Call after adopted consumers have observed their host startup receipts. */
+  readonly settleRetainedStarts: Effect.Effect<number, EffectOutboxError>;
   readonly claimNext: (input: {
     readonly workerId: string;
     readonly excludeRestartContinuations?: boolean;
@@ -505,6 +507,7 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
       reconcileAfterProcessLoss: Effect.gen(function* () {
         const retained = yield* readRetained;
         const now = DateTime.formatIso(yield* DateTime.now);
+        // Only turn starts have host receipts; other in-flight controls cannot be replayed safely.
         const cancelledRows = yield* sql<{ readonly effect_id: string }>`
           UPDATE orchestration_v2_effect_outbox
           SET
@@ -515,7 +518,10 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
             last_error = 'Cancelled because the server process ended before the effect completed.'
           WHERE status IN ('pending', 'running')
             AND effect_type IN ${sql.in(PROCESS_BOUND_EFFECT_TYPES)}
-            AND NOT coalesce(${retainedPredicate(retained)}, 0)
+            AND (
+              NOT coalesce(${retainedPredicate(retained)}, 0)
+              OR (status = 'running' AND effect_type != 'provider-turn.start')
+            )
           RETURNING effect_id
         `;
         const requeuedRows = yield* sql<{ readonly effect_id: string }>`
@@ -535,6 +541,25 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
       }).pipe(
         Effect.mapError(
           (cause) => new EffectOutboxError({ operation: "reconcile-process-loss", cause }),
+        ),
+      ),
+      settleRetainedStarts: Effect.gen(function* () {
+        const retained = yield* readRetained;
+        const now = DateTime.formatIso(yield* DateTime.now);
+        const rows = yield* sql<{ readonly effect_id: string }>`
+          UPDATE orchestration_v2_effect_outbox
+          SET status = 'succeeded', lease_owner = NULL, completed_at = ${now}, updated_at = ${now}, last_error = NULL
+          WHERE status IN ('pending', 'running')
+            AND effect_type = 'provider-turn.start'
+            AND coalesce(${retainedPredicate(retained)}, 0)
+          RETURNING effect_id
+        `;
+        yield* signalSettled(rows.map((row) => row.effect_id));
+        if (rows.length > 0) yield* notifyAvailable(rows.length);
+        return rows.length;
+      }).pipe(
+        Effect.mapError(
+          (cause) => new EffectOutboxError({ operation: "settle-retained-starts", cause }),
         ),
       ),
       // The worker polls for the next effect even when there is no work to claim.

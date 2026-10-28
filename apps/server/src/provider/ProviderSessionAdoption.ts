@@ -7,6 +7,7 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as RetainedProviderWork from "../orchestration-v2/RetainedProviderWork.ts";
+import * as EffectOutbox from "../orchestration-v2/EffectOutbox.ts";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
@@ -45,6 +46,7 @@ const make = Effect.gen(function* () {
   const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
   const turns = yield* ProviderTurnStartService.ProviderTurnStartServiceV2;
   const projections = yield* ProjectionStore.ProjectionStoreV2;
+  const outbox = yield* EffectOutbox.EffectOutboxV2;
   const scope = yield* Scope.Scope;
   const retainedWork = yield* Effect.serviceOption(RetainedProviderWork.RetainedProviderWork);
   const failure = (cause: unknown) => new ProviderSessionAdoptionError({ cause });
@@ -129,7 +131,11 @@ const make = Effect.gen(function* () {
         }).pipe(Effect.mapError(failure)),
         awaitStartup: Effect.forEach(workers, (worker) => Fiber.join(worker), {
           discard: true,
-        }).pipe(Effect.mapError(failure)),
+        }).pipe(
+          Effect.andThen(outbox.settleRetainedStarts),
+          Effect.asVoid,
+          Effect.mapError(failure),
+        ),
       };
     }).pipe(Effect.mapError(failure)),
   );

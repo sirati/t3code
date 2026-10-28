@@ -1,4 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off - Real IPC fixture with a private temporary socket directory.
+import * as ProviderPrivateTransport from "./ProviderPrivateTransport.ts";
+import * as ProviderContinuationHost from "./ProviderContinuationHost.ts";
 import { assert, it } from "@effect/vitest";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
@@ -232,11 +234,12 @@ it.live(
             Layer.provide(Layer.succeed(ProviderSessionHost.ProviderSessionHost, host)),
             Layer.provide(McpProviderSessions.layer),
             Layer.provide(ProviderMcpIngress.layer),
-            Layer.provide(Layer.succeed(ProviderSessionTransport.HostTransportConfig, config)),
+            Layer.provide(ProviderContinuationHost.layer.pipe(Layer.provide(PlatformCrypto.layer))),
+            Layer.provide(Layer.succeed(ProviderPrivateTransport.HostTransportConfig, config)),
           ),
         );
         const clientLayer = ProviderSessionTransport.layerClient.pipe(
-          Layer.provide(Layer.succeed(ProviderSessionTransport.HostTransportConfig, config)),
+          Layer.provide(Layer.succeed(ProviderPrivateTransport.HostTransportConfig, config)),
         );
         const credentials: ReadonlyArray<McpCredentialSnapshot> = [
           {
@@ -359,7 +362,7 @@ it.live(
           Effect.provide(
             ProviderSessionTransport.layerClient.pipe(
               Layer.provide(
-                Layer.succeed(ProviderSessionTransport.HostTransportConfig, {
+                Layer.succeed(ProviderPrivateTransport.HostTransportConfig, {
                   ...config,
                   token: NodeCrypto.randomUUID(),
                 }),

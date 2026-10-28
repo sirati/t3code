@@ -1,3 +1,4 @@
+import * as ProviderPrivateTransport from "../provider/ProviderPrivateTransport.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -6,7 +7,6 @@ import * as Schema from "effect/Schema";
 import { Command, Flag, GlobalFlag } from "effect/cli";
 import * as ServerConfig from "../config.ts";
 import * as ProviderSessionHostProcess from "../provider/ProviderSessionHostProcess.ts";
-import * as ProviderSessionTransport from "../provider/ProviderSessionTransport.ts";
 import { resolveServerConfig, sharedServerCommandFlags } from "./config.ts";
 
 class HostDescriptorError extends Schema.TaggedError<HostDescriptorError>()(
@@ -54,7 +54,7 @@ export const providerSessionHostCommand = Command.make("__provider-host", {
       });
       return yield* ProviderSessionHostProcess.run.pipe(
         Effect.provideService(ServerConfig.ServerConfig, config),
-        Effect.provideService(ProviderSessionTransport.HostTransportConfig, transport),
+        Effect.provideService(ProviderPrivateTransport.HostTransportConfig, transport),
       );
     }),
   ),

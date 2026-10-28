@@ -5,7 +5,8 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as Rpc from "effect/rpc/Rpc";
 import * as RpcGroup from "effect/rpc/RpcGroup";
-import * as RpcMiddleware from "effect/rpc/RpcMiddleware";
+import * as ProviderPrivateTransport from "./ProviderPrivateTransport.ts";
+import * as ProviderContinuationHost from "./ProviderContinuationHost.ts";
 import * as ProviderSessionHost from "./ProviderSessionHost.ts";
 import * as ProviderMcpIngress from "./ProviderMcpIngress.ts";
 import { McpCredentialSnapshot } from "../mcp/McpCredentialSnapshot.ts";
@@ -15,15 +16,6 @@ import { OpenHostedSessionInput, sessionMethods } from "./ProviderSessionMethods
 const isAdapterError = Schema.is(Adapter.ProviderAdapterV2Error);
 const sequenceCursor = Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0));
 
-export class HostAuthorizationError extends Schema.TaggedError<HostAuthorizationError>()(
-  "HostAuthorizationError",
-  {},
-) {}
-
-export class HostAuthorization extends RpcMiddleware.Service<HostAuthorization>()(
-  "t3/provider/HostAuthorization",
-  { error: HostAuthorizationError },
-) {}
 const ownedSession = { sessionId: ProviderSessionId, lease: Schema.String };
 const error = Schema.Union([
   ProviderSessionHost.ProviderSessionHostError,
@@ -43,6 +35,13 @@ const mcpConfig = Schema.Struct({
 });
 
 export const ProviderSessionRpc = RpcGroup.make(
+  Rpc.make("continuations.route", {
+    payload: Schema.Struct({ endpoint: Schema.String, token: Schema.String }),
+    success: Schema.Void,
+    error: ProviderContinuationHost.ProviderContinuationHostError,
+  }),
+  Rpc.make("continuations.pause", { payload: Schema.Struct({}), success: Schema.Void }),
+  Rpc.make("continuations.drain", { payload: Schema.Struct({}), success: Schema.Void }),
   Rpc.make("mcp.checkpoint", {
     payload: Schema.Struct({ credentials: Schema.Array(McpCredentialSnapshot) }),
     success: Schema.Void,
@@ -104,11 +103,12 @@ export const ProviderSessionRpc = RpcGroup.make(
     success: Schema.Unknown,
     error,
   }),
-).middleware(HostAuthorization);
+).middleware(ProviderPrivateTransport.HostAuthorization);
 
 export const layer = ProviderSessionRpc.toLayer(
   Effect.gen(function* () {
     const host = yield* ProviderSessionHost.ProviderSessionHost;
+    const continuations = yield* ProviderContinuationHost.ProviderContinuationHost;
     const ingress = yield* ProviderMcpIngress.ProviderMcpIngress;
     const mcp = yield* McpProviderSessions.McpProviderSessions;
     let credentials: ReadonlyArray<McpCredentialSnapshot> = [];
@@ -121,6 +121,9 @@ export const layer = ProviderSessionRpc.toLayer(
       });
     };
     return ProviderSessionRpc.of({
+      "continuations.route": (config) => continuations.route(config),
+      "continuations.pause": () => continuations.pause,
+      "continuations.drain": () => continuations.awaitDrained,
       "mcp.checkpoint": (request) =>
         Effect.sync(() => {
           credentials = request.credentials;

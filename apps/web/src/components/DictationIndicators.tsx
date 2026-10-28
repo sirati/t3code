@@ -25,7 +25,7 @@ function VoiceBars({ session, label }: { session: DictationSessionView; label: s
   const scaleRef = useRef<HTMLSpanElement>(null);
   const smoothed = useRef(0);
   const level = session.level ?? 0;
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Smooth provider loudness into a compositor transform, stopping when the rounded level settles or this field unmounts.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Smooth provider loudness into a compositor transform, stopping near its target or when this field unmounts.
   useLayoutEffect(() => {
     if (session.phase !== "recording") return;
     let frame = 0;
@@ -33,10 +33,11 @@ function VoiceBars({ session, label }: { session: DictationSessionView; label: s
     const update = (now: number) => {
       const keep = 0.85 ** (Math.max(0, now - previous) / (1000 / 60));
       previous = now;
-      const next = Math.floor((smoothed.current * keep + level * (1 - keep)) * 100) / 100;
-      const settled = next === smoothed.current;
-      smoothed.current = next;
-      if (scaleRef.current) scaleRef.current.style.transform = `scaleY(${Math.max(1, 5 * next)})`;
+      const next = smoothed.current * keep + level * (1 - keep);
+      const settled = Math.abs(next - level) < 0.0001;
+      smoothed.current = settled ? level : next;
+      if (scaleRef.current)
+        scaleRef.current.style.transform = `scaleY(${Math.max(1, 5 * smoothed.current)})`;
       if (!settled && document.visibilityState === "visible") frame = requestAnimationFrame(update);
     };
     frame = requestAnimationFrame(update);

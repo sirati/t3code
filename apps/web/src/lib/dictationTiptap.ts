@@ -18,18 +18,20 @@ export function registerDictationTiptap(
   return registerDictationEditor(editor.view.dom, () => {
     if (!editor.isEditable || editor.isDestroyed) return null;
     let bookmark = editor.state.selection.getBookmark();
-    let state = editor.state;
-    let currentEditor = editor;
-    const detached = captureDetached?.();
+    let state: EditorState | null = editor.state;
+    let currentEditor: Editor | null = editor;
+    let detached = captureDetached?.();
     let form = editor.view.dom.closest("form");
     let disposed = false;
     const map = ({ transaction }: { transaction: Transaction }) => {
+      if (!currentEditor) return;
       bookmark = bookmark.map(transaction.mapping);
       state = currentEditor.state;
     };
     const attach = (next: Editor) => {
+      if (disposed || !state) return;
       if (JSON.stringify(state.doc.toJSON()) !== JSON.stringify(next.state.doc.toJSON())) return;
-      currentEditor.off("transaction", map);
+      currentEditor?.off("transaction", map);
       currentEditor = next;
       form = next.view.dom.closest("form");
       state = next.state;
@@ -44,7 +46,7 @@ export function registerDictationTiptap(
     return {
       apply(text, submit) {
         const editor = currentEditor;
-        if (disposed) return false;
+        if (disposed || !editor || !state) return false;
         if (editor.isDestroyed || !editor.view.dom.isConnected) {
           if (!detached) return false;
           const selection = bookmark.resolve(state.doc);
@@ -74,12 +76,20 @@ export function registerDictationTiptap(
         return true;
       },
       dispose() {
+        if (disposed) return;
         disposed = true;
-        currentEditor.off("transaction", map);
-        if (draftKey) {
-          const targets = pendingDraftTargets.get(draftKey);
-          targets?.delete(attach);
-          if (targets?.size === 0) pendingDraftTargets.delete(draftKey);
+        try {
+          currentEditor?.off("transaction", map);
+        } finally {
+          currentEditor = null;
+          state = null;
+          form = null;
+          detached = undefined;
+          if (draftKey) {
+            const targets = pendingDraftTargets.get(draftKey);
+            targets?.delete(attach);
+            if (targets?.size === 0) pendingDraftTargets.delete(draftKey);
+          }
         }
       },
     };

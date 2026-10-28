@@ -4,19 +4,46 @@ import * as Effect from "effect/Effect";
 import * as Schedule from "effect/Schedule";
 import * as Option from "effect/Option";
 import * as DesktopAssets from "./DesktopAssets.ts";
+import { makeComponentLogger } from "./DesktopObservability.ts";
+import {
+  DictationSessionTargets,
+  DICTATION_SESSION_TIMEOUT_ERROR,
+} from "@t3tools/shared/dictationSessionTargets";
 import { app, BrowserWindow, ipcMain, nativeImage, type WebContents } from "electron";
 
 const eventChannel = "dictation:event";
 const responseChannel = "dictation:respond";
 const acknowledgementChannel = "dictation:acknowledge";
 
-function connectDictation(icon: string | null) {
+const { logError } = makeComponentLogger("desktop-dictation");
+
+function connectDictation(
+  icon: string | null,
+  reportError: (session: string, error: string) => void,
+) {
   let stopped = false;
   let client: Client | null = null;
   let lease: number | null = null;
   let lastWindow: BrowserWindow | null = BrowserWindow.getFocusedWindow();
-  const targets = new Map<string, WebContents>();
-  const listeners = new Set<number>();
+  const targets = new DictationSessionTargets<WebContents>(
+    () => {},
+    (session, target) => {
+      reportError(session, DICTATION_SESSION_TIMEOUT_ERROR);
+      if (!target.isDestroyed()) target.send(eventChannel, { kind: "timeout", session });
+      void client?.acknowledge(session, false, DICTATION_SESSION_TIMEOUT_ERROR).catch(() => {});
+    },
+  );
+  const listeners = new Map<number, { target: WebContents; destroyed: () => void }>();
+  const removeListener = (id: number) => {
+    const listener = listeners.get(id);
+    if (!listener) return;
+    listeners.delete(id);
+    listener.target.off("destroyed", listener.destroyed);
+    if (lastWindow?.isDestroyed() || lastWindow?.webContents.id === id) lastWindow = null;
+    for (const [session, target] of targets) {
+      if (target.id === id) targets.delete(session);
+    }
+  };
   const activate = (_event: unknown, window: BrowserWindow) => {
     lastWindow = window;
     const current = client;
@@ -39,12 +66,17 @@ function connectDictation(icon: string | null) {
     if (currentLease !== null) void client?.deactivate(currentLease).catch(() => {});
   };
   const listen = (event: Electron.IpcMainEvent) => {
-    listeners.add(event.sender.id);
+    if (!listeners.has(event.sender.id)) {
+      const id = event.sender.id;
+      const destroyed = () => removeListener(id);
+      listeners.set(id, { target: event.sender, destroyed });
+      event.sender.once("destroyed", destroyed);
+    }
     const window = BrowserWindow.fromWebContents(event.sender);
     if (window?.isFocused()) activate(null, window);
   };
   const unlisten = (event: Electron.IpcMainEvent) => {
-    listeners.delete(event.sender.id);
+    removeListener(event.sender.id);
   };
   ipcMain.on("dictation:listen", listen);
   ipcMain.on("dictation:unlisten", unlisten);
@@ -55,8 +87,14 @@ function connectDictation(icon: string | null) {
       targets.get(session)?.id !== event.sender.id
     )
       throw new Error("Invalid dictation offer response");
-    await client?.respond(session, accept);
-    if (!accept) targets.delete(session);
+    try {
+      await client?.respond(session, accept);
+    } catch (error) {
+      targets.delete(session);
+      throw error;
+    } finally {
+      if (!accept) targets.delete(session);
+    }
   });
   ipcMain.handle(
     acknowledgementChannel,
@@ -68,8 +106,9 @@ function connectDictation(icon: string | null) {
         targets.get(session)?.id !== event.sender.id
       )
         throw new Error("Invalid dictation acknowledgement");
-      await client?.acknowledge(session, applied, error);
       targets.delete(session);
+      if (!applied) reportError(session, error ?? "Dictation could not be delivered.");
+      await client?.acknowledge(session, applied, error);
     },
   );
   app.on("browser-window-focus", activate);
@@ -113,8 +152,17 @@ function connectDictation(icon: string | null) {
           });
         } else if (event.kind === "cancelled") {
           const target = targets.get(event.session);
+          const timedOut =
+            event.reason === "session timed out" || event.reason === "offer timed out";
+          const error = `Dictation failed because the broker reported: ${event.reason}. The original input has been released.`;
+          if (timedOut && target) reportError(event.session, error);
           if (target && !target.isDestroyed())
-            target.send(eventChannel, { kind: "cancelled", session: event.session });
+            target.send(
+              eventChannel,
+              timedOut
+                ? { kind: "timeout", session: event.session, error }
+                : { kind: "cancelled", session: event.session },
+            );
           targets.delete(event.session);
         }
       }
@@ -133,6 +181,7 @@ function connectDictation(icon: string | null) {
     run,
     stop: () => {
       stopped = true;
+      lastWindow = null;
       client?.close();
       app.off("browser-window-focus", activate);
       app.off("browser-window-blur", deactivate);
@@ -140,6 +189,8 @@ function connectDictation(icon: string | null) {
       ipcMain.removeHandler(acknowledgementChannel);
       ipcMain.off("dictation:listen", listen);
       ipcMain.off("dictation:unlisten", unlisten);
+      targets.clear();
+      for (const id of listeners.keys()) removeListener(id);
     },
   };
 }
@@ -152,8 +203,13 @@ export const start = Effect.fn("DesktopDictation.start")(function* () {
       ? nativeImage.createFromPath(path).resize({ width: 64, height: 64 }).toDataURL()
       : null;
   });
+  const runFork = Effect.runForkWith(yield* Effect.context<never>());
   const resource = yield* Effect.acquireRelease(
-    Effect.sync(() => connectDictation(icon)),
+    Effect.sync(() =>
+      connectDictation(icon, (session, error) => {
+        runFork(logError(error, { session }));
+      }),
+    ),
     (resource) => Effect.sync(resource.stop),
   );
   yield* Effect.promise(resource.run).pipe(

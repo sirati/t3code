@@ -1008,6 +1008,7 @@ export interface DesktopBridge {
       listener: (
         event:
           | { kind: "offer" | "cancelled"; session: string }
+          | { kind: "timeout"; session: string; error?: string }
           | { kind: "transcript"; session: string; text: string; submit: boolean },
       ) => void,
     ) => () => void;

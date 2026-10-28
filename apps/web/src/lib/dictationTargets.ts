@@ -1,4 +1,9 @@
 import { flushSync } from "react-dom";
+import {
+  DictationSessionTargets,
+  DICTATION_SESSION_TIMEOUT_ERROR,
+} from "@t3tools/shared/dictationSessionTargets";
+import { toastManager } from "../components/ui/toast";
 
 export interface DictationTarget {
   apply(text: string, submit: boolean): boolean;
@@ -15,11 +20,12 @@ export function registerDictationEditor(element: Element, capture: () => Dictati
 }
 
 export function captureDictationTarget(document: Document): DictationTarget | null {
-  const element = document.activeElement;
-  if (!element) return null;
-  const editor = editors.get(element);
+  const focused = document.activeElement;
+  if (!focused) return null;
+  const editor = editors.get(focused);
   if (editor) return editor();
-  if (!(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement)) return null;
+  if (!(focused instanceof HTMLInputElement || focused instanceof HTMLTextAreaElement)) return null;
+  let element: HTMLInputElement | HTMLTextAreaElement | null = focused;
   if (
     element.disabled ||
     element.readOnly ||
@@ -34,31 +40,34 @@ export function captureDictationTarget(document: Document): DictationTarget | nu
   let disposed = false;
   return {
     apply(text, submit) {
+      const input = element;
       if (
         disposed ||
-        !element.isConnected ||
-        element.disabled ||
-        element.readOnly ||
-        element.value !== original
+        !input ||
+        !input.isConnected ||
+        input.disabled ||
+        input.readOnly ||
+        input.value !== original
       )
         return false;
       const value = original.slice(0, start) + text + original.slice(end);
       const prototype =
-        element instanceof HTMLInputElement
+        input instanceof HTMLInputElement
           ? HTMLInputElement.prototype
           : HTMLTextAreaElement.prototype;
-      Object.getOwnPropertyDescriptor(prototype, "value")!.set!.call(element, value);
-      element.setSelectionRange(start + text.length, start + text.length);
+      Object.getOwnPropertyDescriptor(prototype, "value")!.set!.call(input, value);
+      input.setSelectionRange(start + text.length, start + text.length);
       flushSync(() =>
-        element.dispatchEvent(
+        input.dispatchEvent(
           new InputEvent("input", { bubbles: true, inputType: "insertText", data: text }),
         ),
       );
-      if (submit && element.form) element.form.requestSubmit();
+      if (submit && input.form) input.form.requestSubmit();
       return true;
     },
     dispose() {
       disposed = true;
+      element = null;
     },
   };
 }
@@ -66,7 +75,20 @@ export function captureDictationTarget(document: Document): DictationTarget | nu
 export function startDictationTargets() {
   const bridge = window.desktopBridge?.dictation;
   if (!bridge) return () => {};
-  const sessions = new Map<string, DictationTarget>();
+  const reportTimeout = (session: string, error = DICTATION_SESSION_TIMEOUT_ERROR) => {
+    console.error(error, { session });
+    toastManager.add({
+      type: "error",
+      title: "Dictation timed out",
+      description: error,
+      timeout: 0,
+    });
+    void bridge.acknowledge(session, false, error).catch(() => {});
+  };
+  const sessions = new DictationSessionTargets<DictationTarget>(
+    (target) => target.dispose(),
+    (session) => reportTimeout(session),
+  );
   const unsubscribe = bridge.onEvent(async (event) => {
     if (event.kind === "offer") {
       const target = captureDictationTarget(document);
@@ -74,7 +96,6 @@ export function startDictationTargets() {
       try {
         await bridge.respond(event.session, target !== null);
       } catch {
-        target?.dispose();
         sessions.delete(event.session);
       }
     } else if (event.kind === "transcript") {
@@ -83,7 +104,6 @@ export function startDictationTargets() {
       try {
         applied = target?.apply(event.text, event.submit) ?? false;
       } finally {
-        target?.dispose();
         sessions.delete(event.session);
         try {
           await bridge.acknowledge(
@@ -96,13 +116,13 @@ export function startDictationTargets() {
         }
       }
     } else {
-      sessions.get(event.session)?.dispose();
+      const target = sessions.get(event.session);
       sessions.delete(event.session);
+      if (event.kind === "timeout" && target) reportTimeout(event.session, event.error);
     }
   });
   return () => {
     unsubscribe();
-    for (const target of sessions.values()) target.dispose();
     sessions.clear();
   };
 }

@@ -86,6 +86,12 @@ contextBridge.exposeInMainWorld("desktopBridge", {
           return;
         if (value.kind === "offer" || value.kind === "cancelled")
           listener({ kind: value.kind, session: value.session });
+        else if (value.kind === "timeout")
+          listener({
+            kind: "timeout",
+            session: value.session,
+            ...("error" in value && typeof value.error === "string" ? { error: value.error } : {}),
+          });
         else if (
           value.kind === "transcript" &&
           "text" in value &&

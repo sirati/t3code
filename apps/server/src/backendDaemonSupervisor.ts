@@ -7,6 +7,7 @@ import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import { isBackendDaemonReady, type BackendDaemonRole } from "./backendDaemonProtocol.ts";
+import { BackendDaemonControl } from "./backendDaemonControl.ts";
 
 export interface DaemonCommand {
   readonly command: string;
@@ -24,9 +25,11 @@ interface ManagedProcess {
 
 export interface BackendDaemonSupervisorOptions {
   readonly platform: NodeJS.Platform;
+  readonly stateDirectory?: string;
   readonly hostCommand: (descriptorFile: string) => Promise<DaemonCommand>;
   readonly backendCommand: (descriptorFile: string) => Promise<DaemonCommand>;
   readonly environment?: Readonly<NodeJS.ProcessEnv>;
+  readonly workingDirectory?: string;
   readonly startupTimeoutMs?: number;
   readonly shutdownTimeoutMs?: number;
   readonly onError: (error: Error) => void;
@@ -37,6 +40,7 @@ export class BackendDaemonSupervisor {
   readonly #processes = new Set<ManagedProcess>();
   readonly #failure = Promise.withResolvers<Error>();
   #directory: string | undefined;
+  #control: BackendDaemonControl | undefined;
   #descriptorFile: string | undefined;
   #host: ManagedProcess | undefined;
   #backend: ManagedProcess | undefined;
@@ -72,6 +76,14 @@ export class BackendDaemonSupervisor {
     try {
       this.#directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-daemon-"));
       await NodeFSP.chmod(this.#directory, 0o700);
+      if (this.#options.stateDirectory !== undefined)
+        this.#control = await BackendDaemonControl.open({
+          stateDirectory: this.#options.stateDirectory,
+          transportDirectory: this.#directory,
+          platform: this.#options.platform,
+          status: () => this.status,
+          reload: () => this.reload(),
+        });
       this.#descriptorFile = NodePath.join(this.#directory, "host.json");
       const endpoint =
         this.#options.platform === "win32"
@@ -104,6 +116,9 @@ export class BackendDaemonSupervisor {
     if (this.#stopping) throw new Error("The backend daemon is stopping.");
     const child = NodeChildProcess.spawn(command.command, [...command.args], {
       env: { ...(this.#options.environment ?? process.env) },
+      ...(this.#options.workingDirectory === undefined
+        ? {}
+        : { cwd: this.#options.workingDirectory }),
       detached: this.#options.platform !== "win32",
       stdio: ["ignore", "inherit", "inherit", "ipc"],
     });
@@ -263,6 +278,9 @@ export class BackendDaemonSupervisor {
 
   async #cleanup(): Promise<void> {
     for (const record of [...this.#processes].reverse()) await this.#terminate(record, true);
+    const control = this.#control;
+    this.#control = undefined;
+    await control?.close();
     if (this.#directory !== undefined)
       await NodeFSP.rm(this.#directory, { recursive: true, force: true });
   }

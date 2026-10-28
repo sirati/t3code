@@ -32,6 +32,7 @@ import { themeCommand } from "./cli/theme.ts";
 import { traceCommand } from "./cli/trace.ts";
 import { triageCommand } from "./cli/triage.ts";
 import { providerSessionHostCommand } from "./cli/providerSessionHost.ts";
+import { backendDaemonCommand } from "./cli/backendDaemon.ts";
 
 const layerCliRuntime = Layer.mergeAll(NodeServices.layer, NetService.layer);
 
@@ -74,6 +75,7 @@ export const makeCli = ({ cloudEnabled = hasCloudPublicConfig } = {}) =>
       acpMcpCallCommand,
       startCommand,
       serveCommand,
+      backendDaemonCommand,
       appCommand,
       pairCommand,
       authCommand,

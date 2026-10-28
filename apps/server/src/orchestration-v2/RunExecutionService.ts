@@ -1005,7 +1005,11 @@ export const layer: Layer.Layer<
           const delivery = input.session.eventDelivery?.receiptFor(event);
           return delivery === undefined
             ? undefined
-            : { ...delivery, consumer: `run:${input.run.id}`, operation };
+            : {
+                ...delivery,
+                consumer: `run:${input.run.id.length}:${input.run.id}:${input.attempt.id}`,
+                operation,
+              };
         };
         let workerOwnsSubscription = false;
         const eventSubscription: ProviderAdapter.ProviderAdapterV2EventSubscription =
@@ -1324,9 +1328,14 @@ export const layer: Layer.Layer<
           runId: input.run.id,
           attemptId: input.attempt.id,
         };
-        const releaseHostedConsumer = (
-          input.session.eventDelivery?.releaseRunConsumer?.(hostedRunConsumer) ?? Effect.void
-        ).pipe(
+        const releaseHostedConsumer = Ref.get(terminalEvent).pipe(
+          Effect.flatMap(
+            (terminal) =>
+              input.session.eventDelivery?.releaseRunConsumer?.({
+                ...hostedRunConsumer,
+                ...(terminal === null ? {} : { providerTurnId: terminal.providerTurnId }),
+              }) ?? Effect.void,
+          ),
           Effect.catchCause(() =>
             Effect.logWarning("Could not release hosted run consumer", {
               runId: input.run.id,

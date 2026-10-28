@@ -112,6 +112,7 @@ const refusedBeforePrompt = (error: unknown): boolean =>
 
 export interface ProviderTurnStartServiceV2Shape {
   readonly adopt: (input: {
+    readonly attemptId?: OrchestrationV2RunAttempt["id"];
     readonly threadId: ThreadId;
     readonly runId: RunId;
     readonly session: ProviderAdapter.ProviderAdapterV2SessionRuntime;
@@ -1538,14 +1539,15 @@ export const layer: Layer.Layer<
       "ProviderTurnStartService.adopt",
     )(
       function* (input) {
+        const terminal = input.terminal;
         const projection = yield* projectionStore.getThreadProjection(input.threadId);
         const run = projection.runs.find((candidate) => candidate.id === input.runId);
-        const rootNode = projection.nodes.find((candidate) => candidate.id === run?.rootNodeId);
         const attempt = projection.attempts.find(
-          (candidate) => candidate.id === run?.activeAttemptId,
+          (candidate) => candidate.id === (input.attemptId ?? run?.activeAttemptId),
         );
+        const rootNode = projection.nodes.find((candidate) => candidate.id === attempt?.rootNodeId);
         const providerThread = projection.providerThreads.find(
-          (candidate) => candidate.id === run?.providerThreadId,
+          (candidate) => candidate.id === attempt?.providerThreadId,
         );
         const checkpointScope = projection.checkpointScopes.find(
           (candidate) => candidate.id === rootNode?.checkpointScopeId,
@@ -1561,20 +1563,28 @@ export const layer: Layer.Layer<
           checkpointScope === undefined ||
           message === undefined ||
           providerThread.providerSessionId !== input.session.providerSessionId ||
-          run.providerInstanceId !== input.session.instanceId ||
+          attempt.runId !== run.id ||
+          attempt.providerInstanceId !== input.session.instanceId ||
           providerThread.driver !== input.session.driver ||
-          (input.terminal !== undefined && input.terminal.status !== run.status) ||
-          !(
-            run.status === "starting" ||
-            run.status === "running" ||
-            run.status === "waiting" ||
-            (input.terminal !== undefined &&
-              input.terminal.status === run.status &&
-              input.terminal.providerTurnId === attempt.providerTurnId &&
-              input.terminal.providerThreadId === providerThread.id &&
-              input.terminal.runOrdinal === run.ordinal &&
-              input.terminal.driver === input.session.driver)
-          )
+          (terminal === undefined
+            ? !(
+                attempt.id === run.activeAttemptId &&
+                (run.status === "starting" || run.status === "running" || run.status === "waiting")
+              )
+            : !(
+                terminal.providerTurnId === attempt.providerTurnId &&
+                terminal.providerThreadId === providerThread.id &&
+                terminal.runOrdinal === run.ordinal &&
+                terminal.driver === input.session.driver &&
+                terminal.status === rootNode.status &&
+                (attempt.status === terminal.status || attempt.status === "superseded") &&
+                projection.providerTurns.some(
+                  (turn) =>
+                    turn.id === terminal.providerTurnId &&
+                    turn.runAttemptId === attempt.id &&
+                    turn.status === terminal.status,
+                )
+              ))
         )
           return yield* new ProviderTurnStartError({ runId: input.runId });
         const inheritedBackgroundTurnItems = RunExecutionService.selectInheritedBackgroundTurnItems(
@@ -1594,7 +1604,16 @@ export const layer: Layer.Layer<
           runOrdinal: run.ordinal,
           inheritedBackgroundTurnItems,
         });
-        const subagents = projection.subagents.filter((subagent) => subagent.runId === run.id);
+        const attemptNodeIds = new Set(
+          projection.nodes
+            .filter((node) => node.id === rootNode.id || node.rootNodeId === rootNode.id)
+            .map((node) => node.id),
+        );
+        const subagents = projection.subagents.filter(
+          (subagent) =>
+            subagent.runId === run.id &&
+            (attemptNodeIds.has(subagent.id) || attemptNodeIds.has(subagent.parentNodeId)),
+        );
         const relatedThreadIds = subagents.flatMap((subagent) =>
           subagent.childThreadId === null ? [] : [subagent.childThreadId],
         );
@@ -1603,6 +1622,11 @@ export const layer: Layer.Layer<
         );
         const ownedProviderThreads = new Set([providerThread.id, ...relatedProviderThreadIds]);
         const inheritedItemIds = new Set(inheritedBackgroundTurnItems.map((item) => item.id));
+        const attemptTurnIds = new Set(
+          projection.providerTurns
+            .filter((turn) => turn.runAttemptId === attempt.id)
+            .map((turn) => turn.id),
+        );
         const lifecycleEvents: Array<ProviderAdapter.ProviderAdapterV2Event> = [
           ...subagents.map((subagent) => ({
             type: "subagent.updated" as const,
@@ -1628,7 +1652,9 @@ export const layer: Layer.Layer<
               providerTurn,
             })),
           ...projection.nodes
-            .filter((node) => node.runId === run.id || relatedThreadIds.includes(node.threadId))
+            .filter(
+              (node) => attemptNodeIds.has(node.id) || relatedThreadIds.includes(node.threadId),
+            )
             .map((node) => ({
               type: "node.updated" as const,
               driver: input.session.driver,
@@ -1637,7 +1663,12 @@ export const layer: Layer.Layer<
           ...projection.turnItems
             .filter(
               (item) =>
-                item.runId === run.id ||
+                (item.runId === run.id &&
+                  ((item.nodeId !== null && attemptNodeIds.has(item.nodeId)) ||
+                    (item.providerTurnId !== null && attemptTurnIds.has(item.providerTurnId)) ||
+                    (attempt.id === run.activeAttemptId &&
+                      item.nodeId === null &&
+                      item.providerTurnId === null))) ||
                 inheritedItemIds.has(item.id) ||
                 relatedThreadIds.includes(item.threadId),
             )
@@ -1647,12 +1678,27 @@ export const layer: Layer.Layer<
               turnItem,
             })),
         ];
+        const modelSelection =
+          run.modelSelection.instanceId === input.session.instanceId
+            ? run.modelSelection
+            : {
+                instanceId: input.session.instanceId,
+                model: input.session.providerSession.model ?? run.modelSelection.model,
+              };
         yield* runExecution.startRootRun({
           commandId: CommandId.make(`command:provider-adopt:${run.id}:${attempt.id}`),
           appThread: projection.thread,
           providerSessionId: input.session.providerSessionId,
           session: input.session,
-          run,
+          run: {
+            ...run,
+            activeAttemptId: attempt.id,
+            rootNodeId: rootNode.id,
+            providerThreadId: providerThread.id,
+            providerInstanceId: attempt.providerInstanceId,
+            status: terminal?.status ?? run.status,
+            modelSelection,
+          },
           rootNode,
           checkpointScope,
           providerThread,
@@ -1681,7 +1727,7 @@ export const layer: Layer.Layer<
                   ),
                 }),
             lifecycleEvents:
-              input.terminal === undefined ? lifecycleEvents : [...lifecycleEvents, input.terminal],
+              terminal === undefined ? lifecycleEvents : [...lifecycleEvents, terminal],
           },
           loadInheritedBackgroundTurnItems: controls.loadInheritedBackgroundTurnItems,
           relatedThreadIds,
@@ -1699,10 +1745,10 @@ export const layer: Layer.Layer<
               ? {}
               : { scheduledTaskId: message.scheduledTaskId }),
           },
-          modelSelection: run.modelSelection,
+          modelSelection,
           runtimePolicy: yield* runtimePolicy.resolve({
             thread: projection.thread,
-            modelSelection: run.modelSelection,
+            modelSelection,
           }),
         });
       },

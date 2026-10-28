@@ -1,7 +1,7 @@
 import {
   ProviderInstanceId,
   ProviderSessionId,
-  type ProviderThreadId,
+  type ProviderTurnId,
   OrchestrationV2ProviderSession,
 } from "@t3tools/contracts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -150,7 +150,7 @@ interface HostedSession {
   attached: boolean;
   ended: boolean;
   failure: unknown;
-  lastTerminals: Map<ProviderThreadId, ProviderAdapter.ProviderAdapterV2TerminalEvent>;
+  lastTerminals: Map<ProviderTurnId, ProviderAdapter.ProviderAdapterV2TerminalEvent>;
   runConsumers: Map<string, ProviderAdapter.ProviderAdapterV2RunConsumer>;
   turnOperations: Map<
     string,
@@ -284,7 +284,7 @@ const make = Effect.gen(function* () {
                   Effect.sync(() => {
                     entry.journalHead = envelope.sequence;
                     if (event.type === "turn.terminal")
-                      entry.lastTerminals.set(event.providerThreadId, event);
+                      entry.lastTerminals.set(event.providerTurnId, event);
                     if (event.type === "provider_session.updated")
                       entry.providerSession = event.providerSession;
                   }),
@@ -513,6 +513,9 @@ const make = Effect.gen(function* () {
       if (retained) entry.runConsumers.set(key, consumer);
       else {
         entry.runConsumers.delete(key);
+        if (consumer.providerTurnId !== undefined)
+          entry.lastTerminals.delete(consumer.providerTurnId);
+        if (entry.runConsumers.size === 0) entry.lastTerminals.clear();
         // Consumer release follows durable terminal ingestion, so this attempt cannot start again.
         for (const [id, operation] of entry.turnOperations) {
           if (

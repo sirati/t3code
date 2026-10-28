@@ -76,6 +76,7 @@ export const ProviderAdapterV2SessionStatus = Schema.Literals([
 export type ProviderAdapterV2SessionStatus = typeof ProviderAdapterV2SessionStatus.Type;
 
 export const ProviderAdapterV2RunConsumer = Schema.Struct({
+  providerTurnId: Schema.optionalKey(ProviderTurnId),
   threadId: ThreadId,
   runId: RunId,
   attemptId: RunAttemptId,

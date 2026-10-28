@@ -1,4 +1,4 @@
-import { useLayoutEffect, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useStore } from "zustand";
 import { AudioLines, ArrowDownToLine } from "lucide-react";
@@ -7,6 +7,8 @@ import { dictationTargetId, isDictationElement } from "../lib/dictationTargets";
 import { Button } from "./ui/button";
 import { Tooltip, TooltipTrigger, TooltipPopup } from "./ui/tooltip";
 import { observeResize } from "../lib/observeResize";
+import { observeVisibleAnimation } from "../lib/visibleAnimation";
+import { Spinner } from "./ui/spinner";
 
 interface Field {
   element: HTMLElement;
@@ -19,43 +21,60 @@ interface Field {
 }
 
 function VoiceBars({ session, label }: { session: DictationSessionView; label: string }) {
-  const bands = session.spectrum;
-  const magnitudes = ["low", "low-mid", "mid", "high-mid", "high"].map((id, index) => {
-    if (!bands?.length) return { id, magnitude: session.level ?? 0 };
-    const start = Math.floor((index * bands.length) / 5);
-    const end = Math.max(start + 1, Math.floor(((index + 1) * bands.length) / 5));
-    const selected = bands.slice(start, end);
-    return {
-      id,
-      magnitude: selected.reduce((sum, band) => sum + band, 0) / Math.max(1, selected.length),
+  const scaleRef = useRef<HTMLSpanElement>(null);
+  const smoothed = useRef(0);
+  const level = session.level ?? 0;
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Smooth provider loudness into a compositor transform, stopping when the rounded level settles or this field unmounts.
+  useLayoutEffect(() => {
+    if (session.phase !== "recording") return;
+    let frame = 0;
+    let previous = performance.now() - 1000 / 60;
+    const update = (now: number) => {
+      const keep = 0.85 ** (Math.max(0, now - previous) / (1000 / 60));
+      previous = now;
+      const next = Math.floor((smoothed.current * keep + level * (1 - keep)) * 100) / 100;
+      const settled = next === smoothed.current;
+      smoothed.current = next;
+      if (scaleRef.current) scaleRef.current.style.transform = `scaleY(${Math.max(1, 5 * next)})`;
+      if (!settled && document.visibilityState === "visible") frame = requestAnimationFrame(update);
     };
-  });
+    frame = requestAnimationFrame(update);
+    return () => cancelAnimationFrame(frame);
+  }, [level, session.phase]);
   const title = session.moving
     ? "Moving dictation here"
-    : !session.canMove
-      ? "Inserting dictation"
-      : !session.levelSupported
-        ? "Receiving dictation. This provider does not supply voice levels."
-        : "Receiving dictation";
+    : session.phase === "processing"
+      ? "Processing dictation"
+      : session.phase === "delivering"
+        ? "Inserting dictation"
+        : !session.levelSupported
+          ? "Receiving dictation. This provider does not supply voice levels."
+          : "Receiving dictation";
   return (
-    <span className="pointer-events-none flex size-6 items-center justify-center rounded-md bg-primary/10 text-primary">
-      <svg role="img" aria-label={`${title}: ${label}`} width="24" height="22" viewBox="0 0 24 22">
-        {magnitudes.map(({ id, magnitude }, index) => {
-          const height = 3 + Math.max(0, Math.min(1, magnitude)) * 15;
-          return (
-            <rect
-              key={id}
-              x={2 + index * 4.2}
-              y={(22 - height) / 2}
-              width="2.6"
-              height={height}
-              rx="1.3"
-              fill="currentColor"
-              className="transition-[height,y] duration-100 motion-reduce:transition-none"
-            />
-          );
-        })}
-      </svg>
+    <span className="pointer-events-none flex h-6 w-10 items-center justify-center rounded-md bg-primary/10 text-primary">
+      {session.phase !== "recording" ? (
+        <Spinner size="md" aria-label={`${title}: ${label}`} />
+      ) : (
+        <span
+          role="img"
+          aria-label={`${title}: ${label}`}
+          ref={observeVisibleAnimation}
+          className="flex h-5 w-[38px] items-center"
+        >
+          <span ref={scaleRef} className="flex h-0.5 items-center gap-0.5">
+            {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((index) => (
+              <span
+                key={index}
+                className="dictation-wave-bar block w-0.5 rounded-full bg-current"
+                style={{
+                  height: 2 * Math.max(0, 1 - (4.5 - index) ** 2 / 48),
+                  animationDelay: `${0.1 * (index < 5 ? index : index - 10) - 1}s`,
+                }}
+              />
+            ))}
+          </span>
+        </span>
+      )}
     </span>
   );
 }
@@ -74,7 +93,7 @@ function ActiveDictationIndicators({ sessions }: { sessions: readonly DictationS
     let queued = false;
     let elements: HTMLElement[] = [];
     const padding = new Map<HTMLElement, { value: string; priority: string; applied: string }>();
-    const width = count * 28 + 4;
+    const width = count * 44 + 4;
     const restore = (element: HTMLElement) => {
       const original = padding.get(element);
       if (!original) return;
@@ -223,7 +242,7 @@ function ActiveDictationIndicators({ sessions }: { sessions: readonly DictationS
           key={field.id}
           className="absolute flex items-center gap-1 rounded-md bg-background/95"
           style={{
-            left: field.left + field.width - (count * 28 + 4),
+            left: field.left + field.width - (count * 44 + 4),
             top: field.top + Math.max(0, (Math.min(field.height, 32) - 24) / 2),
           }}
         >

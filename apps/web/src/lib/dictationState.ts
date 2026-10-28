@@ -6,6 +6,7 @@ export interface DictationSessionView {
   targetId: string | null;
   canMove: boolean;
   moving: boolean;
+  phase: "recording" | "processing" | "delivering";
   levelSupported: boolean;
   level: number | null;
   spectrum: readonly number[] | null;

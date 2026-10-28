@@ -104,7 +104,7 @@ stdenv.mkDerivation (
         ;
 
       fetcherVersion = 4;
-      hash = "sha256-IZ2gt0nGMk6gMpqCCbQZgEHSSFU0ZJYRb4Xai4jqoj8=";
+      hash = "sha256-Q3lGYTNtNHhb7mfqGYb6udso5dNl1paujOW4dHlGNVs=";
     };
 
     preBuild = ''

@@ -19,6 +19,26 @@ it("moves an accepted dictation across windows only on request, and freezes owne
     router.audio("session", { level: 0.7, spectrum: [0.2, 0.8] });
     expect(events.at(-1)?.event).toMatchObject({ kind: "audio", level: 0.7 });
     router.move("session", 2);
+    router.processing("session");
+    expect(events.at(-1)?.event).toMatchObject({
+      kind: "active",
+      phase: "processing",
+      canMove: false,
+    });
+    expect(() => router.move("session", 1)).toThrow();
+    const count = events.length;
+    router.processing("session");
+    router.audio("session", { level: 1, spectrum: [1] });
+    expect(events).toHaveLength(count);
+    router.listen(4);
+    expect(events.at(-1)?.event).toMatchObject({
+      kind: "active",
+      phase: "processing",
+      canMove: false,
+    });
+    router.offer("next", 1, "Provider", { level: true, spectrum: false });
+    router.accept("next", 1, true);
+    router.move("next", 2);
     expect(router.deliver("session", "destination", true)).toBe(true);
     expect(events.at(-1)).toEqual({
       window: 2,

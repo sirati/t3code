@@ -115,6 +115,10 @@ contextBridge.exposeInMainWorld("desktopBridge", {
           typeof value.owned === "boolean" &&
           "canMove" in value &&
           typeof value.canMove === "boolean" &&
+          "phase" in value &&
+          (value.phase === "recording" ||
+            value.phase === "processing" ||
+            value.phase === "delivering") &&
           "audio" in value &&
           typeof value.audio === "object" &&
           value.audio !== null &&
@@ -129,6 +133,7 @@ contextBridge.exposeInMainWorld("desktopBridge", {
             provider: value.provider,
             owned: value.owned,
             canMove: value.canMove,
+            phase: value.phase,
             revision: value.revision,
             audio: { level: value.audio.level, spectrum: value.audio.spectrum },
           });

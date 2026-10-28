@@ -1018,6 +1018,7 @@ export type DesktopDictationEvent =
       provider: string;
       owned: boolean;
       canMove: boolean;
+      phase: "recording" | "processing" | "delivering";
       revision: number;
       audio: { level: boolean; spectrum: boolean };
     }

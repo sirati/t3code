@@ -13,6 +13,7 @@ import {
   startDictationTargets,
 } from "./dictationTargets";
 import { registerDictationTiptap } from "./dictationTiptap";
+import "../index.css";
 
 function pendingMove() {
   let resolve!: (revision: number) => void;
@@ -280,6 +281,7 @@ it("shows live bars in the saved field and moves the selection and submission on
   });
   await bridge.deliver({
     kind: "active",
+    phase: "recording",
     session: "ui",
     provider: "Speech",
     owned: true,
@@ -295,9 +297,7 @@ it("shows live bars in the saved field and moves the selection and submission on
     level: 0.8,
     spectrum: [0.2, 0.4, 0.6, 0.8, 1],
   });
-  await vi.waitFor(() =>
-    expect(originalBars.element().querySelectorAll("rect")[4]?.getAttribute("height")).toBe("18"),
-  );
+  expect(originalBars.element().querySelectorAll(".dictation-wave-bar")).toHaveLength(10);
   second.focus();
   second.setSelectionRange(6, 11);
   await expect.element(originalBars).toBeVisible();
@@ -319,6 +319,66 @@ it("shows live bars in the saved field and moves the selection and submission on
     .element(page.getByRole("button", { name: "Move dictation here: first", exact: true }))
     .not.toBeInTheDocument();
   await vi.waitFor(() => expect(second.style.paddingInlineEnd).toBe(originalPadding));
+});
+
+it("offers moves only for the new recording while the previous session is processing", async () => {
+  // router: false because two broker sessions share isolated input fields.
+  await using screen = await render(
+    <>
+      <input aria-label="first" />
+      <input aria-label="second" />
+      <input aria-label="third" />
+      <DictationIndicators />
+    </>,
+    { router: false },
+  );
+  using bridge = installDictationBridge();
+  const stop = startDictationTargets();
+  using _cleanup = { [Symbol.dispose]: stop };
+  const first = screen.getByRole("textbox", { name: "first" }).element() as HTMLInputElement;
+  const second = screen.getByRole("textbox", { name: "second" }).element() as HTMLInputElement;
+  const active = {
+    kind: "active" as const,
+    phase: "recording" as const,
+    provider: "Speech",
+    owned: true,
+    canMove: true,
+    revision: 0,
+    audio: { level: true, spectrum: false },
+  };
+  first.focus();
+  await bridge.deliver({ kind: "offer", session: "old", audio: active.audio });
+  await bridge.deliver({ ...active, session: "old" });
+  await bridge.deliver({ ...active, session: "old", phase: "processing", canMove: false });
+  second.focus();
+  await bridge.deliver({ kind: "offer", session: "new", audio: active.audio });
+  await bridge.deliver({ ...active, session: "new" });
+  await expect
+    .element(page.getByRole("status", { name: "Processing dictation: first" }))
+    .toBeVisible();
+  await expect
+    .element(page.getByRole("img", { name: "Receiving dictation: second" }))
+    .toBeVisible();
+  await vi.waitFor(() =>
+    expect(
+      document.querySelectorAll('button[aria-label^="Move dictation here: third"]'),
+    ).toHaveLength(1),
+  );
+  expect(await dictationState.getState().move!("old", second)).toBe(false);
+  await bridge.deliver({
+    kind: "transcript",
+    session: "old",
+    text: "first transcript",
+    submit: false,
+  });
+  expect(first.value).toBe("first transcript");
+  expect(second.value).toBe("");
+  expect(dictationState.getState().sessions.map((entry) => entry.session)).toEqual(["new"]);
+  await bridge.deliver({ kind: "cancelled", session: "new" });
+  expect(dictationState.getState().sessions).toEqual([]);
+  await expect
+    .element(page.getByRole("button", { name: /Move dictation here/ }))
+    .not.toBeInTheDocument();
 });
 
 it.each(["rejected", "superseded", "cancelled", "finishing"] as const)(
@@ -352,6 +412,7 @@ it.each(["rejected", "superseded", "cancelled", "finishing"] as const)(
     await bridge.deliver({ kind: "offer", session: "race" });
     const active = {
       kind: "active" as const,
+      phase: "recording" as const,
       session: "race",
       provider: "Speech",
       owned: true,
@@ -414,6 +475,7 @@ it("does not extend the session lifetime when voice updates arrive or the destin
   await bridge.deliver({ kind: "offer", session: "deadline" });
   await bridge.deliver({
     kind: "active",
+    phase: "recording",
     session: "deadline",
     provider: "Speech",
     owned: true,
@@ -465,6 +527,7 @@ it("inserts into a transferred destination even if delivery arrives before its m
   await bridge.deliver({ kind: "offer", session: "fast-delivery" });
   const active = {
     kind: "active" as const,
+    phase: "recording" as const,
     session: "fast-delivery",
     provider: "Speech",
     owned: true,

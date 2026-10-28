@@ -129,6 +129,8 @@ function connectDictation(
           routes.offer(event.session, window.webContents.id, event.provider, event.audio);
         } else if (event.kind === "audio") {
           routes.audio(event.session, event.frame);
+        } else if (event.kind === "processing") {
+          routes.processing(event.session);
         } else if (event.kind === "transcript") {
           if (!routes.deliver(event.session, event.transcript.text, event.transcript.submit)) {
             routes.end(event.session);

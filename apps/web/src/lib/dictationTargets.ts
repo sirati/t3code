@@ -144,6 +144,7 @@ export function startDictationTargets() {
         targetId: entry.targetId,
         canMove: entry.canMove && !entry.moving,
         moving: entry.moving,
+        phase: entry.phase,
         levelSupported: entry.levelSupported,
         level: entry.level,
         spectrum: entry.spectrum,
@@ -184,6 +185,7 @@ export function startDictationTargets() {
     moveRevision: null,
     canMove: false,
     moving: false,
+    phase: "recording",
     levelSupported,
     level: null,
     spectrum: null,
@@ -273,6 +275,11 @@ export function startDictationTargets() {
       entry.owned = event.owned;
       entry.provider = event.provider;
       entry.canMove = event.canMove;
+      entry.phase = event.phase;
+      if (event.phase !== "recording") {
+        entry.level = null;
+        entry.spectrum = null;
+      }
       entry.levelSupported = event.audio.level || event.audio.spectrum;
       if (!event.owned && !entry.moving) releaseTargets(entry);
       if (
@@ -293,7 +300,7 @@ export function startDictationTargets() {
       publish();
     } else if (event.kind === "audio") {
       const entry = sessions.get(event.session);
-      if (!entry) return;
+      if (!entry || entry.phase !== "recording") return;
       entry.level = event.level;
       entry.spectrum = event.spectrum;
       publish();

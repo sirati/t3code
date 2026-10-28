@@ -7,7 +7,7 @@ import {
 type Audio = { level: boolean; spectrum: boolean };
 type Route = {
   owner: number | null;
-  phase: "offered" | "recording" | "delivering";
+  phase: "offered" | "recording" | "processing" | "delivering";
   provider: string;
   audio: Audio;
   revision: number;
@@ -47,6 +47,7 @@ export class DesktopDictationRoutes {
         audio: route.audio,
         owned: route.owner === id,
         canMove: route.phase === "recording",
+        phase: route.phase === "offered" ? "recording" : route.phase,
         revision: route.revision,
       });
   }
@@ -62,6 +63,7 @@ export class DesktopDictationRoutes {
           audio: route.audio,
           owned: route.owner === id,
           canMove: route.phase === "recording",
+          phase: route.phase,
           revision: route.revision,
         });
     }
@@ -125,9 +127,21 @@ export class DesktopDictationRoutes {
     });
   }
 
+  processing(session: string) {
+    const route = this.sessions.get(session);
+    if (!route || route.phase !== "recording") return;
+    route.phase = "processing";
+    this.publish(session, route);
+  }
+
   deliver(session: string, text: string, submit: boolean) {
     const route = this.sessions.get(session);
-    if (!route || route.phase !== "recording" || route.owner === null) return false;
+    if (
+      !route ||
+      (route.phase !== "recording" && route.phase !== "processing") ||
+      route.owner === null
+    )
+      return false;
     route.phase = "delivering";
     this.publish(session, route);
     this.send(route.owner, { kind: "transcript", session, text, submit });

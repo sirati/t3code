@@ -10,11 +10,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1793159390,
-        "narHash": "sha256-yKbRdrnCh/eaAWUFC5kC5J+pIf0zzfI8SJ5mGDaDubI=",
+        "lastModified": 1793175244,
+        "narHash": "sha256-a6N9lXNLYr9PAapXFMS0UEeJDCX4s8XLCzMrlKB+/1s=",
         "owner": "sirati",
         "repo": "dictation-api",
-        "rev": "6e6c06129e7c915b7edcd93e90c7d69a80df0dd6",
+        "rev": "dcd031da509c7d545054aba3c82bc10b5644b004",
         "type": "github"
       },
       "original": {

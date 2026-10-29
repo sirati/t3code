@@ -15,6 +15,66 @@ import {
   writeDevelopmentLauncherScript,
 } from "./electron-launcher.mjs";
 
+function withElectronOverrideFixture(run) {
+  const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-electron-override-"));
+  try {
+    const packageDir = NodePath.join(directory, "node_modules/electron");
+    NodeFS.mkdirSync(packageDir, { recursive: true });
+    NodeFS.writeFileSync(NodePath.join(packageDir, "package.json"), '{"version":"0.0.0"}');
+    const script = NodePath.join(directory, "ensure-electron-runtime.mjs");
+    NodeFS.copyFileSync(new URL("./ensure-electron-runtime.mjs", import.meta.url), script);
+    const runtimeDir = NodePath.join(directory, "runtime");
+    // oxlint-disable-next-line t3code/no-global-process-runtime -- The fixture mirrors Electron's native platform path.
+    const platform = NodeOS.platform();
+    const platformPath =
+      platform === "darwin"
+        ? "Electron.app/Contents/MacOS/Electron"
+        : platform === "win32"
+          ? "electron.exe"
+          : "electron";
+    run({ directory, packageDir, script, runtimeDir, platformPath });
+  } finally {
+    NodeFS.rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+describe("external Electron runtime", () => {
+  it("uses an external runtime without installing or changing its permissions", () => {
+    withElectronOverrideFixture(({ packageDir, script, runtimeDir, platformPath }) => {
+      const executable = NodePath.join(runtimeDir, platformPath);
+      NodeFS.mkdirSync(NodePath.dirname(executable), { recursive: true });
+      NodeFS.writeFileSync(executable, "external runtime", { mode: 0o444 });
+      const originalMode = NodeFS.statSync(executable).mode;
+      const output = NodeChildProcess.execFileSync(process.execPath, [script], {
+        env: { ...process.env, ELECTRON_OVERRIDE_DIST_PATH: runtimeDir },
+        encoding: "utf8",
+      });
+      assert.equal(output.trim(), executable);
+      assert.equal(NodeFS.statSync(executable).mode, originalMode);
+      assert.equal(
+        NodeFS.readFileSync(NodePath.join(packageDir, "path.txt"), "utf8"),
+        platformPath,
+      );
+      assert.isFalse(NodeFS.existsSync(NodePath.join(packageDir, "dist")));
+    });
+  });
+
+  it("reports a missing override instead of downloading a different runtime", () => {
+    withElectronOverrideFixture(({ packageDir, script, runtimeDir, platformPath }) => {
+      const result = NodeChildProcess.spawnSync(process.execPath, [script], {
+        env: { ...process.env, ELECTRON_OVERRIDE_DIST_PATH: runtimeDir },
+        encoding: "utf8",
+      });
+      assert.notEqual(result.status, 0);
+      assert.include(
+        result.stderr,
+        `Electron override executable does not exist: ${NodePath.join(runtimeDir, platformPath)}`,
+      );
+      assert.isFalse(NodeFS.existsSync(NodePath.join(packageDir, "dist")));
+    });
+  });
+});
+
 describe("electron development launcher", () => {
   it("uses captured values only as fallbacks for a live runner environment", () => {
     const environmentScript = makeDevelopmentEnvironmentScript({

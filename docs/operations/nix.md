@@ -177,3 +177,20 @@ for a given data directory and listener.
 Manage these services through Nix and `systemctl` (or `systemctl --user`).
 Do not use `t3 service install` or `t3 update` to manage the Nix-provided unit;
 update the flake input and rebuild the configuration instead.
+
+## Dictation broker
+
+The desktop client uses `sirati/dictation-api` through a pinned GitHub dependency. The flake locks the same revision for its native addon. Update both `inputs.dictation-api` and the revision in `apps/desktop/package.json` together, then regenerate `pnpm-lock.yaml` and the dependency hash in `nix/package.nix`.
+
+To run the broker declaratively in Home Manager:
+
+```nix
+{
+  imports = [ inputs.dictation-api.homeManagerModules.default ];
+  services.dictation-api.enable = true;
+}
+```
+
+Add `inputs.dictation-api.url = "github:sirati/dictation-api"` to the configuration's flake and pass `inputs` through `extraSpecialArgs`. NixOS can instead import `inputs.dictation-api.nixosModules.default`, which also creates a user service. Both start the broker with the graphical session. Do not also use the broker's imperative service installer.
+
+T3 captures the original input and selection when it accepts dictation. Delivery follows that input after focus changes. If the original editor has been unmounted, T3 reports failure to the dictation provider, so a transcript cannot land in a different conversation.

@@ -423,6 +423,9 @@ importers:
       '@crowecawcaw/xa11y':
         specifier: 0.13.0
         version: 0.13.0
+      '@dictation-api/client':
+        specifier: git+ssh://git@github.com/sirati/dictation-api.git#dcd031da509c7d545054aba3c82bc10b5644b004
+        version: https://codeload.github.com/sirati/dictation-api/tar.gz/dcd031da509c7d545054aba3c82bc10b5644b004
       '@effect/platform-node':
         specifier: 4.0.5
         version: 4.0.5(bufferutil@4.1.0)(effect@4.0.5)(redis@6.2.1)(utf-8-validate@6.0.6)
@@ -3439,6 +3442,11 @@ packages:
     peerDependenciesMeta:
       '@types/react':
         optional: true
+
+  '@dictation-api/client@https://codeload.github.com/sirati/dictation-api/tar.gz/dcd031da509c7d545054aba3c82bc10b5644b004':
+    resolution: {gitHosted: true, integrity: sha512-5syMTgwpZjEJXIcOd3EdPTbqx0xY/cS7eW2n1AY1rkiLwzbUur6Za4skmuKzghvkDVKgtvgzLJ1AZJGHN+iv1w==, tarball: https://codeload.github.com/sirati/dictation-api/tar.gz/dcd031da509c7d545054aba3c82bc10b5644b004}
+    version: 0.1.0
+    engines: {node: '>=22'}
 
   '@dimforge/rapier3d-compat@0.12.0':
     resolution: {integrity: sha512-uekIGetywIgopfD97oDL5PfeezkFpNhwlzlaEYNOA0N6ghdsOvh/HYjSMek5Q2O1PYvRSDFcqFVJl4r4ZBwOow==}
@@ -13404,6 +13412,8 @@ snapshots:
       react-day-picker: 10.0.1(@types/react@19.3.0)(react@19.3.0)
     optionalDependencies:
       '@types/react': 19.3.0
+
+  '@dictation-api/client@https://codeload.github.com/sirati/dictation-api/tar.gz/dcd031da509c7d545054aba3c82bc10b5644b004': {}
 
   '@dimforge/rapier3d-compat@0.12.0': {}
 

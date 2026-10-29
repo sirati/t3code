@@ -1321,6 +1321,7 @@ export default function ChatView(props: ChatViewProps) {
     onDismissUserInput: onDismissUserInputStable,
     onSelectActivePendingUserInputOption: onSelectActivePendingUserInputOptionStable,
     onChangeActivePendingUserInputCustomAnswer,
+    capturePendingDictationDraft,
     onAdvanceActivePendingUserInput,
     onAdvanceActivePendingUserInputStable,
     onPreviousActivePendingUserInputQuestion: onPreviousActivePendingUserInputQuestionStable,
@@ -2791,7 +2792,7 @@ export default function ChatView(props: ChatViewProps) {
     activeEnvironmentUnavailable,
     defaultRuntimeMode,
   });
-  const { onSend } = useComposerSend({
+  const { onSend, captureDictationSubmission } = useComposerSend({
     environmentId,
     routeThreadKey,
     currentRouteThreadKeyRef,
@@ -3581,6 +3582,8 @@ export default function ChatView(props: ChatViewProps) {
                               onPageScrollRelease={onComposerPageScrollReleaseStable}
                               onCompactContext={onComposerCompactContextStable}
                               onSend={onComposerSendStable}
+                              captureDictationSubmission={captureDictationSubmission}
+                              capturePendingDictationDraft={capturePendingDictationDraft}
                               onResume={onComposerResumeStable}
                               onInterrupt={onInterruptStable}
                               onImplementPlanInNewThread={onImplementPlanInNewThreadStable}

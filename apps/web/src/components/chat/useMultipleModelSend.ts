@@ -221,7 +221,7 @@ export function useMultipleModelSend(input: MultipleModelSendInput) {
         }),
       );
       sendInFlightRef.current = false;
-      resetLocalDispatch();
+      if (currentRouteThreadKeyRef.current === routeThreadKey) resetLocalDispatch();
       releasedComposer = true;
       await starts;
       if (startedCount > 0) {
@@ -308,7 +308,7 @@ export function useMultipleModelSend(input: MultipleModelSendInput) {
     }
     if (!releasedComposer) {
       sendInFlightRef.current = false;
-      resetLocalDispatch();
+      if (currentRouteThreadKeyRef.current === routeThreadKey) resetLocalDispatch();
     }
   };
 }

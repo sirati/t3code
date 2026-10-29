@@ -11,15 +11,24 @@ import { startAppServices } from "./appInit";
 import { AppRoot } from "./AppRoot";
 import { whenLocaleReady } from "./i18n/runtime";
 import { chunkLoadState } from "./lib/chunkReloadGuard";
+import { startDictationTargets } from "./lib/dictationTargets";
+import { DictationIndicators } from "./components/DictationIndicators";
 
 const stopTrackingKeyboardLayout = trackKeyboardLayout();
 import.meta.hot?.dispose(stopTrackingKeyboardLayout);
 
 const router = startAppServices();
+const stopDictationTargets = startDictationTargets();
+import.meta.hot?.dispose(stopDictationTargets);
 
 const clerkPublishableKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY as string | undefined;
 
-const app = <AppRoot router={router} />;
+const app = (
+  <>
+    <AppRoot router={router} />
+    <DictationIndicators />
+  </>
+);
 
 // Split by runtime to keep Clerk out of local startup and clerk-js out of browser builds.
 const managedAuthShellModule =

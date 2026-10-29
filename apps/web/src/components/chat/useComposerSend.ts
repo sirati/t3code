@@ -161,6 +161,54 @@ import type { useQueuedRunEdit } from "./useQueuedRunEdit";
 import type { useTimelineFollow } from "./useTimelineFollow";
 import type { useUsageLimitsPanel } from "./useUsageLimitsPanel";
 import type { useWorktreeSetup } from "./useWorktreeSetup";
+import type { ChatComposerHandle } from "./ChatComposer";
+import { getComposerSubmissionValidationMessage } from "./composerSubmission";
+
+type CapturedDictationSubmission = {
+  prompt: string;
+  context: ReturnType<ChatComposerHandle["getSendContext"]>;
+  hasPendingAttachments: boolean;
+};
+
+type ComposerSendRefs = Pick<
+  ComposerSendInput,
+  "promptRef" | "composerImagesRef" | "composerFilesRef" | "composerTerminalContextsRef"
+> & {
+  readonly composerRef: {
+    readonly current: Pick<
+      ChatComposerHandle,
+      "getSendContext" | "resetCursorState" | "hasPendingAttachments" | "validateProviderInput"
+    > | null;
+  };
+};
+
+function dictationSubmissionRefs(
+  captured: CapturedDictationSubmission,
+  reportError: (error: string) => void,
+): ComposerSendRefs {
+  return {
+    promptRef: { current: captured.prompt },
+    composerImagesRef: { current: captured.context.images },
+    composerFilesRef: { current: captured.context.files },
+    composerTerminalContextsRef: { current: captured.context.terminalContexts },
+    composerRef: {
+      current: {
+        getSendContext: () => captured.context,
+        resetCursorState: () => {},
+        hasPendingAttachments: () => captured.hasPendingAttachments,
+        validateProviderInput: (providerInput: string) => {
+          const error = getComposerSubmissionValidationMessage({
+            prompt: captured.prompt,
+            providerInput,
+            submissionTarget: "provider-turn",
+          });
+          if (error) reportError(error);
+          return error === null;
+        },
+      },
+    },
+  };
+}
 
 const ENVIRONMENT_UNAVAILABLE_SEND_TOAST_TRAIL_SIZE = 3;
 
@@ -334,10 +382,10 @@ export function useComposerSend(input: ComposerSendInput) {
     providerInstanceEntries,
     composerRef,
     composerDraftTarget,
-    promptRef,
-    composerImagesRef,
-    composerFilesRef,
-    composerTerminalContextsRef,
+    promptRef: livePromptRef,
+    composerImagesRef: liveComposerImagesRef,
+    composerFilesRef: liveComposerFilesRef,
+    composerTerminalContextsRef: liveComposerTerminalContextsRef,
     feedbackUploadsInFlightRef,
     queuedRunEdit,
     isRevertingCheckpoint,
@@ -402,7 +450,7 @@ export function useComposerSend(input: ComposerSendInput) {
     draftId,
     composerDraftTarget,
     composerRef,
-    promptRef,
+    promptRef: livePromptRef,
     runtimeMode,
     startFromOrigin,
     worktreeRepositories,
@@ -421,7 +469,15 @@ export function useComposerSend(input: ComposerSendInput) {
     respondingRequestIdsRef.current = respondingRequestIds;
   }, [pendingApprovals, respondingRequestIds]);
 
-  const onSend = async (
+  // A dictation can outlive this route, so its send gets isolated refs instead of the live composer's.
+  const sendWithRefs = async (
+    {
+      promptRef,
+      composerRef,
+      composerImagesRef,
+      composerFilesRef,
+      composerTerminalContextsRef,
+    }: ComposerSendRefs,
     e?: { preventDefault: () => void },
     dispatchMode: ComposerDispatchMode = "auto",
     submissionIntent: ComposerSubmissionIntent = "foreground",
@@ -1165,6 +1221,7 @@ export function useComposerSend(input: ComposerSendInput) {
     if (
       isCurrentRouteThread() &&
       multipleModelSelections === null &&
+      currentRouteThreadKeyRef.current === routeThreadKey &&
       shouldDockDraftHeroForSubmission({ isDraftHeroState, activeThreadKey, submissionIntent }) &&
       activeThreadKey
     ) {
@@ -1643,7 +1700,7 @@ export function useComposerSend(input: ComposerSendInput) {
         if (turnUsesAttachmentUploads) {
           releaseDraftAttachments(composerAttachmentsSnapshot);
         }
-        acknowledgeActiveThreadWoke();
+        if (currentRouteThreadKeyRef.current === routeThreadKey) acknowledgeActiveThreadWoke();
         // A draft still on screen finalizes once its thread route takes over.
         if (sentDraftThreadRef) {
           if (backgroundDraftOpened || currentRouteThreadKeyRef.current !== routeThreadKey) {
@@ -1791,6 +1848,28 @@ export function useComposerSend(input: ComposerSendInput) {
       if (!sendQueuesBehindSetup && isCurrentRouteThread()) resetLocalDispatch();
     }
   };
+  const onSend = (
+    e?: { preventDefault: () => void },
+    dispatchMode?: ComposerDispatchMode,
+    submissionIntent?: ComposerSubmissionIntent,
+    directAnnotation?: {
+      annotation: PreviewAnnotationPayload;
+      image: ComposerImageAttachment | null;
+    },
+  ) =>
+    sendWithRefs(
+      {
+        promptRef: livePromptRef,
+        composerRef,
+        composerImagesRef: liveComposerImagesRef,
+        composerFilesRef: liveComposerFilesRef,
+        composerTerminalContextsRef: liveComposerTerminalContextsRef,
+      },
+      e,
+      dispatchMode,
+      submissionIntent,
+      directAnnotation,
+    );
 
   const onSendLatest = useStableCallback(onSend);
   const waitBeforeSend = async <T>(pending: Promise<T>) => {
@@ -1843,5 +1922,38 @@ export function useComposerSend(input: ComposerSendInput) {
   // No load-balancing refresh: it bails once the draft is no longer displayed, which is the
   // only time a detached send runs, so the draft keeps the environment it was dictated for.
   const captureDetachedSend = useStableCallback(() => onSend);
-  return { onSend: onSendWithRouting, captureDetachedSend };
+  const captureDictationSubmission = () => {
+    const handle = composerRef.current;
+    if (!handle) return undefined;
+    const context = handle.getSendContext();
+    const hasPendingAttachments = handle.hasPendingAttachments();
+    return (prompt: string) => {
+      const draft = useComposerDraftStore.getState().getComposerDraft(composerDraftTarget);
+      const captured = {
+        prompt,
+        context: {
+          ...context,
+          ...(draft
+            ? {
+                images: draft.images,
+                files: draft.files,
+                terminalContexts: draft.terminalContexts,
+                previewAnnotations: draft.previewAnnotations,
+                reviewComments: draft.reviewComments,
+                threadContexts: draft.threadContexts,
+                environmentContexts: draft.environmentContexts,
+              }
+            : {}),
+          prompt,
+        },
+        hasPendingAttachments,
+      };
+      const refs = dictationSubmissionRefs(captured, (error) => {
+        if (activeThread) setThreadError(activeThread.id, error);
+      });
+      void sendWithRefs(refs);
+    };
+  };
+
+  return { onSend: onSendWithRouting, captureDetachedSend, captureDictationSubmission };
 }

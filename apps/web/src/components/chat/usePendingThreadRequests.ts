@@ -661,7 +661,44 @@ export function usePendingThreadRequests(input: {
     onPreviousActivePendingUserInputQuestion,
   );
 
+  const capturePendingDictationDraft = () => {
+    const request = activePendingUserInput;
+    const { activePendingProgress } = readPendingUserInputDraft(draftScope);
+    const question = activePendingProgress?.activeQuestion;
+    if (!request || !question || question.allowCustomAnswer === false) return undefined;
+    const questionIndex = activePendingProgress.questionIndex;
+    const readAnswers = () =>
+      seedUserInputDraftAnswers(
+        request.questions,
+        usePendingUserInputAnswers.getState()[activePendingRequestKey] ?? {},
+      );
+    return {
+      read: () => readAnswers()[question.id]?.customAnswer ?? "",
+      write: (value: string, submit: boolean) => {
+        const answers = {
+          ...readAnswers(),
+          [question.id]: setPendingUserInputCustomAnswer(
+            question,
+            readAnswers()[question.id],
+            value,
+          ),
+        };
+        usePendingUserInputAnswers.setState({ [activePendingRequestKey]: answers });
+        if (submit) {
+          const resolved = buildPendingUserInputAnswers(request.questions, answers);
+          if (resolved) void onRespondToUserInput(request.requestId, resolved);
+          else
+            usePendingUserInputQuestionIndex.setState({
+              [activePendingRequestKey]: questionIndex + 1,
+            });
+        }
+        return true;
+      },
+    };
+  };
+
   return {
+    capturePendingDictationDraft,
     pendingApprovals,
     pendingUserInputs,
     activePendingApproval,

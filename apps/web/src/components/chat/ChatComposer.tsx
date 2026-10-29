@@ -1,5 +1,6 @@
 import { copySnapshot } from "./copySnapshot";
 import { VoiceInputSetup } from "./VoiceInputSetup";
+import { captureComposerDictationDraft } from "../../lib/composerDictation";
 import { useComposerTypingGuard } from "./useComposerTypingGuard";
 import { insertAttachmentReferencesForDraft } from "./composerAttachmentReferences";
 import type { ComposerAttachmentInsertion } from "../composerAttachmentInsertion";
@@ -455,6 +456,10 @@ export interface ChatComposerProps {
   onRemoveEditingQueuedAttachment: (attachmentId: string) => void;
 
   onCompactContext: () => void;
+  captureDictationSubmission: () => ((prompt: string) => void) | undefined;
+  capturePendingDictationDraft: () =>
+    | { read(): string; write(value: string, submit: boolean): boolean }
+    | undefined;
   onSend: (
     e?: { preventDefault: () => void },
     dispatchMode?: ComposerDispatchMode,
@@ -3556,6 +3561,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   )}
                 </button>
                 {collapsedComposerImagePreviews}
+                <span
+                  data-dictation-composer-controls=""
+                  className="flex shrink-0 items-center empty:hidden"
+                />
                 <CollapsedComposerStopAction
                   key={`${environmentId}:${activeThreadId ?? "new"}`}
                   canOperateThread={canOperateThread}
@@ -3680,7 +3689,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
 
               {composerAttachmentFileList}
 
-              <div className="relative">
+              <div data-dictation-composer-editor="" className="relative">
                 {previewFile ? (
                   <ComposerFilePreviewDialog
                     file={previewFile}
@@ -3690,7 +3699,19 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 ) : null}
                 <ComposerContextActionsContext value={composerContextActions}>
                   <ComposerPromptEditor
-                    draftKey={composerDraftTargetKey}
+                    draftKey={JSON.stringify([
+                      composerDraftTargetKey,
+                      activePendingProgress ? pendingUserInputs[0]?.requestId : null,
+                      activePendingProgress?.activeQuestion?.id ?? null,
+                    ])}
+                    captureDictationDraft={() =>
+                      activePendingProgress
+                        ? props.capturePendingDictationDraft()
+                        : captureComposerDictationDraft(
+                            composerDraftTarget,
+                            props.captureDictationSubmission(),
+                          )
+                    }
                     // Switching threads lands focus here, so the label names the thread.
                     ariaLabel={
                       activeThread
@@ -3764,6 +3785,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     data-chat-composer-mobile-pending-actions="true"
                     className="absolute bottom-0 right-0 flex items-center justify-end gap-1"
                   >
+                    <span
+                      data-dictation-composer-controls=""
+                      className="flex shrink-0 items-center empty:hidden"
+                    />
                     <ComposerPrimaryActions
                       compact
                       canOperateThread={canOperateThread}
@@ -3834,6 +3859,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   >
                     {composerControls}
                   </div>
+                  <span
+                    data-dictation-composer-controls=""
+                    className="flex shrink-0 items-center empty:hidden"
+                  />
                   <ComposerFooterPrimaryActions
                     // Stop state belongs to one thread; the composer stays mounted across threads.
                     key={`${environmentId}:${activeThreadId ?? "new"}`}

@@ -25,6 +25,7 @@ import * as EventSink from "./EventSink.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as SessionKeeper from "../provider/SessionKeeper.ts";
 import {
   restartContinuationBlocked,
   restartContinuationRun,
@@ -192,6 +193,9 @@ function latestStartedRun(
 
 export const make = Effect.gen(function* () {
   const settings = yield* ServerSettings.ServerSettingsService;
+  const sessionKeeper = Option.getOrUndefined(
+    yield* Effect.serviceOption(SessionKeeper.SessionKeeper),
+  );
   const projections = yield* ProjectionStore.ProjectionStoreV2;
   const eventSink = yield* EventSink.EventSinkV2;
   const ids = yield* IdAllocator.IdAllocatorV2;
@@ -1202,8 +1206,10 @@ export const make = Effect.gen(function* () {
         ? { exclude: disabledProjects }
         : { include: enabledProjects },
     );
+    // A kept session keeps working by itself; a "continue" message would interrupt it.
+    const kept = sessionKeeper?.keptThreadIds() ?? new Set();
     yield* Effect.forEach(
-      threadIds,
+      threadIds.filter((threadId) => !kept.has(threadId)),
       (threadId) =>
         Effect.gen(function* () {
           const projection = yield* projections.getRuntimeRecoveryProjection(threadId);

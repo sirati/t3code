@@ -23,6 +23,7 @@
   t3code-pnpm,
   t3code-resource-monitor,
   t3code-dictation-addon,
+  t3code-session-keeper,
   git,
   pnpmConfigHook,
   cacert,
@@ -162,6 +163,7 @@ stdenv.mkDerivation (
 
       makeWrapper ${lib.getExe nodejs} "$out"/bin/t3 \
         --set-default T3CODE_RESOURCE_MONITOR_PATH ${lib.getExe t3code-resource-monitor} \
+        --set-default T3CODE_SESSION_KEEPER_PATH ${lib.getExe t3code-session-keeper} \
         --prefix PATH : ${
           lib.makeBinPath [
             nodejs
@@ -241,6 +243,7 @@ stdenv.mkDerivation (
 
     passthru = {
       resourceMonitor = t3code-resource-monitor;
+      sessionKeeper = t3code-session-keeper;
     };
 
     meta = {

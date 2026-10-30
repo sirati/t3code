@@ -20,9 +20,12 @@ let
   ++ cfg.extraArgs;
   escapeExec = value: lib.replaceStrings [ "%" "$" ] [ "%%" "$$" ] (builtins.toJSON value);
   escapeEnvironment = value: lib.replaceStrings [ "%" ] [ "%%" ] (builtins.toJSON value);
-  env = cfg.environment // {
-    PATH = lib.makeBinPath cfg.pathPackages;
-  };
+  env =
+    cfg.environment
+    // {
+      PATH = lib.makeBinPath cfg.pathPackages;
+    }
+    // lib.optionalAttrs cfg.keepActiveSessions { T3CODE_KEEP_SESSIONS = "1"; };
 in
 {
   options.services.t3code = {
@@ -57,6 +60,7 @@ in
       type = types.listOf types.package;
       default = with pkgs; [ git ];
     };
+    keepActiveSessions = mkEnableOption "keeping agent sessions with work in flight running across service restarts";
   };
   config = mkIf cfg.enable {
     systemd.user.services.t3code = {
@@ -73,6 +77,10 @@ in
         RestartSec = 5;
         Environment = lib.mapAttrsToList (name: value: escapeEnvironment "${name}=${value}") env;
         EnvironmentFile = map escapeEnvironment cfg.environmentFiles;
+      }
+      // lib.optionalAttrs cfg.keepActiveSessions {
+        # Only the server may get the stop signal: it detaches busy sessions before anything else ends.
+        KillMode = "mixed";
       };
     };
   };

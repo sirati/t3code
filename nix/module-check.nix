@@ -64,6 +64,12 @@ let
       ];
     };
   };
+  keeping = homeConfig {
+    services.t3code = {
+      enable = true;
+      keepActiveSessions = true;
+    };
+  };
   disabledSystem = systemConfig { };
   disabledHome = homeConfig { };
   invalidUid = systemConfig {
@@ -106,6 +112,10 @@ assert builtins.elem (builtins.toJSON "EXAMPLE=space \"quote\" \\ $VAR %%h")
 assert
   home.systemd.user.services.t3code.Service.EnvironmentFile
   == [ (builtins.toJSON "/run/secrets/t3 env") ];
+assert !(home.systemd.user.services.t3code.Service ? KillMode);
+assert keeping.systemd.user.services.t3code.Service.KillMode == "mixed";
+assert builtins.elem (builtins.toJSON "T3CODE_KEEP_SESSIONS=1")
+  keeping.systemd.user.services.t3code.Service.Environment;
 assert !(lib.all (x: x.assertion) invalidUid.assertions);
 assert !(lib.all (x: x.assertion) invalidNumeric.assertions);
 assert !(lib.all (x: x.assertion) invalid.assertions);

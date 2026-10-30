@@ -58,6 +58,12 @@ import * as NodeUtil from "node:util";
 import { parseCliArgs } from "@t3tools/shared/cliArgs";
 import { fromLenientJson } from "@t3tools/shared/schemaJson";
 import { AgentScope } from "@t3tools/shared/AgentScope";
+import {
+  isDetachedExit,
+  SessionKeeper,
+  type SessionActivity,
+} from "../../provider/SessionKeeper.ts";
+import { spawnKeeperBackedProcess } from "../../provider/keeperProcess.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { applyClaudePromptEffortPrefix } from "@t3tools/shared/model";
 import {
@@ -502,6 +508,8 @@ export interface ClaudeAgentSdkQueryOpenInput {
   readonly options: ClaudeAgentSdkQueryOptions;
   readonly threadId: ThreadId;
   readonly providerSessionId: OrchestrationV2ProviderSession["id"];
+  /** What the session is doing, so a busy one can outlive a server restart. */
+  readonly activity?: Effect.Effect<SessionActivity | undefined>;
 }
 
 export interface ClaudeAgentSdkQuerySession {
@@ -936,6 +944,8 @@ export const layerQueryRunner: Layer.Layer<
     const runFork = Effect.runForkWith(yield* Effect.context<never>());
     const hostEnvironment = yield* HostProcess.Environment;
     const portDiscovery = yield* PortScanner.PortDiscovery;
+    const runSync = Effect.runSyncWith(yield* Effect.context<never>());
+    const sessionKeeper = Option.getOrUndefined(yield* Effect.serviceOption(SessionKeeper));
 
     return ClaudeAgentSdkQueryRunner.of({
       allocateSessionId: crypto
@@ -968,19 +978,35 @@ export const layerQueryRunner: Layer.Layer<
               [PortScanner.AGENT_THREAD_ENV]: input.threadId,
             },
           };
+          // With a keeper, the CLI runs under it and can outlive this server; a kept one is reattached.
+          const keeperPath = sessionKeeper?.keeperPath;
+          const keeperSocket = sessionKeeper?.socketFor(input.providerSessionId);
+          const reattach = sessionKeeper?.takeReattach(input.providerSessionId);
           // The SDK can prepend a scope wrapper to native binaries; script entries run through node.
           const binaryPath = queryOptions.pathToClaudeCodeExecutable;
           const launch =
+            reattach !== undefined ||
             binaryPath === undefined ||
             CLAUDE_SCRIPT_EXTENSIONS.some((ext) => binaryPath.endsWith(ext))
               ? undefined
-              : yield* agentScope.wrap({
-                  command: binaryPath,
-                  args: [],
-                  name: "claude",
-                  threadId: input.threadId,
-                  env: queryOptions.env,
-                });
+              : yield* agentScope.wrap(
+                  keeperPath === undefined || keeperSocket === undefined
+                    ? {
+                        command: binaryPath,
+                        args: [],
+                        name: "claude",
+                        threadId: input.threadId,
+                        env: queryOptions.env,
+                      }
+                    : {
+                        command: keeperPath,
+                        args: ["serve", keeperSocket, "--", binaryPath],
+                        name: "claude",
+                        threadId: input.threadId,
+                        env: queryOptions.env,
+                        survivesRestart: true,
+                      },
+                );
           const options =
             launch === undefined || launch.args.length === 0
               ? queryOptions
@@ -989,12 +1015,57 @@ export const layerQueryRunner: Layer.Layer<
                   pathToClaudeCodeExecutable: launch.command,
                   executableArgs: [...launch.args, ...(queryOptions.executableArgs ?? [])],
                 };
-          const unit = launch?.unit;
+          const unit = reattach?.unit ?? launch?.unit;
           const stopScope =
-            unit === undefined ? undefined : () => void runFork(agentScope.stop(unit));
+            unit === undefined || unit === null
+              ? undefined
+              : () => void runFork(agentScope.stop(unit));
+          const spawnKept = (spawnOptions: ClaudeSpawnOptions) => {
+            if (
+              keeperPath === undefined ||
+              keeperSocket === undefined ||
+              sessionKeeper === undefined
+            ) {
+              return undefined;
+            }
+            const child = spawnKeeperBackedProcess(spawnOptions, {
+              keeperPath,
+              socket: keeperSocket,
+              reattach,
+              serveIncluded: launch !== undefined && launch.args.length > 0,
+              released:
+                reattach === undefined
+                  ? undefined
+                  : sessionKeeper.holdReattached(input.providerSessionId, []),
+              ...(options.stderr === undefined ? {} : { stderr: options.stderr }),
+            });
+            child.once("exit", (code, signal) => {
+              // A detached session lives on in its keeper, scope included.
+              if (isDetachedExit(code, signal)) return;
+              try {
+                signalProcessGroup(child.pid ?? 0, "SIGKILL");
+              } catch {}
+              stopScope?.();
+            });
+            const unregister = sessionKeeper.register({
+              providerSessionId: input.providerSessionId,
+              driver: CLAUDE_PROVIDER,
+              pid: child.pid ?? 0,
+              socket: keeperSocket,
+              unit: unit ?? undefined,
+              pending: undefined,
+              activity: () => (input.activity === undefined ? undefined : runSync(input.activity)),
+              exited: new Promise((resolve) => child.once("exit", () => resolve())),
+            });
+            child.once("exit", unregister);
+            // Node's typings make stdin and stdout nullable; all three are pipes.
+            return child as ClaudeSpawnedProcess;
+          };
           const spawnProcess =
             options.spawnClaudeCodeProcess ??
             ((spawnOptions: ClaudeSpawnOptions) => {
+              const kept = spawnKept(spawnOptions);
+              if (kept !== undefined) return kept;
               if (platform !== "win32") return spawnClaudeProcessGroup(spawnOptions, stopScope);
               const child = NodeChildProcess.spawn(spawnOptions.command, spawnOptions.args, {
                 cwd: spawnOptions.cwd,
@@ -4372,6 +4443,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
     BUNDLED_CLAUDE_MODEL_CATALOG,
     adapterOptions.settings.customModels,
   );
+  const sessionKeeper = Option.getOrUndefined(yield* Effect.serviceOption(SessionKeeper));
   const continuationRequests = adapterOptions.continuationRequests ?? {
     offer: () => Effect.void,
   };
@@ -4600,6 +4672,10 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
         const interruptedTurns = yield* Ref.make(new Set<OrchestrationV2ProviderTurn["id"]>());
         const steeredTurns = yield* Ref.make(new Set<OrchestrationV2ProviderTurn["id"]>());
         const queryContext = yield* Ref.make<ClaudeLiveQueryContext | null>(null);
+        // The session's turn state is defined further down; the runner reads it lazily.
+        let sessionActivity: Effect.Effect<SessionActivity | undefined> = Effect.sync(
+          () => undefined,
+        );
         // A worktree handoff changes the project settings even within one session.
         let bypassCache: { cwd: string | null; availability: ClaudeBypassAvailability } | null =
           null;
@@ -9667,8 +9743,11 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           });
         });
 
-        const canUseTool: CanUseTool = (toolName, toolInput, callbackOptions) =>
-          runPromise(canUseToolEffect(toolName, toolInput, callbackOptions));
+        const canUseTool: CanUseTool = async (toolName, toolInput, callbackOptions) => {
+          // A reattached CLI re-sends its open prompts on initialize, before the continuation turn attaches.
+          await sessionKeeper?.whenReattached(input.providerSessionId);
+          return runPromise(canUseToolEffect(toolName, toolInput, callbackOptions));
+        };
 
         const onUserDialog: NonNullable<ClaudeQueryOptions["onUserDialog"]> = (
           request,
@@ -9950,6 +10029,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               threadId: turnInput.threadId,
               providerSessionId: input.providerSessionId,
               options: queryOptions,
+              activity: Effect.suspend(() => sessionActivity),
             })
             .pipe(
               Effect.onError(() =>
@@ -10170,9 +10250,21 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               gatedFramesBeforeEcho: 0,
               heldRootFrames: [],
             };
+            // Set when this continuation picks up a turn kept across a server restart.
+            let reattached = false;
             const attachTurn = Effect.gen(function* () {
               querySession.lastTurn = context;
               yield* Ref.set(activeTurn, context);
+              // A session kept across a restart releases its held output into this continuation.
+              const kept = isClaudeProviderContinuationTurn(turnInput)
+                ? sessionKeeper?.reattachedTurns(input.providerSessionId)
+                : undefined;
+              if (kept !== undefined) {
+                reattached = true;
+                // The kept native turn is already open, so no wake-turn start is coming.
+                context.nativeWakeStarted = true;
+                yield* kept.release;
+              }
               if (
                 !isClaudeProviderContinuationTurn(turnInput) &&
                 permissionModeForClaudeRuntimePolicy(turnInput.runtimePolicy) ===
@@ -10265,7 +10357,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   updated.delete(nativeThreadId);
                   return updated;
                 });
-                if (drained.length === 0) {
+                // A kept turn's output is still on its way; the CLI's own result ends it.
+                if (drained.length === 0 && !reattached) {
                   const completedAt = yield* DateTime.now;
                   yield* finalizeActiveTurn({ context, status: "completed", completedAt });
                   return;
@@ -10706,6 +10799,47 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           },
         );
 
+        const pendingBackgroundWork = Effect.gen(function* () {
+          for (const roster of (yield* Ref.get(pendingBackgroundTasksByNativeThread)).values()) {
+            if (roster.size > 0) {
+              return true;
+            }
+          }
+          for (const subagent of (yield* Ref.get(sessionSubagentsByTaskId)).values()) {
+            if (subagent.task.status === "running") {
+              return true;
+            }
+          }
+          const buffers = yield* Ref.get(wakeBuffers);
+          for (const entry of buffers.values()) {
+            if (
+              entry.messages.some(
+                (message) =>
+                  message.type === "user" ||
+                  message.type === "assistant" ||
+                  message.type === "result",
+              )
+            ) {
+              return true;
+            }
+          }
+          return false;
+        });
+        // A turn, a request, or background work in flight keeps the session through a restart.
+        sessionActivity = Effect.gen(function* () {
+          const active = yield* Ref.get(activeTurn);
+          const turnInput = active?.input ?? (yield* Ref.get(queryContext))?.lastTurn?.input;
+          if (turnInput === undefined) return undefined;
+          const busy =
+            active !== null ||
+            (yield* Ref.get(pendingRuntimeRequests)).size > 0 ||
+            (yield* pendingBackgroundWork);
+          return {
+            busy,
+            threadId: turnInput.threadId,
+            providerThreadId: turnInput.providerThread.id,
+          };
+        });
         const runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime = {
           instanceId: adapterOptions.instanceId,
           driver: CLAUDE_PROVIDER,
@@ -10715,32 +10849,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             resolveClaudeCatalogContextWindowTokens(BUNDLED_CLAUDE_MODEL_CATALOG, selection),
           events: Stream.fromEffectRepeat(Queue.take(events)),
           backgroundTasksEndWithProcess: true,
-          hasPendingBackgroundWork: Effect.gen(function* () {
-            for (const roster of (yield* Ref.get(pendingBackgroundTasksByNativeThread)).values()) {
-              if (roster.size > 0) {
-                return true;
-              }
-            }
-            for (const subagent of (yield* Ref.get(sessionSubagentsByTaskId)).values()) {
-              if (subagent.task.status === "running") {
-                return true;
-              }
-            }
-            const buffers = yield* Ref.get(wakeBuffers);
-            for (const entry of buffers.values()) {
-              if (
-                entry.messages.some(
-                  (message) =>
-                    message.type === "user" ||
-                    message.type === "assistant" ||
-                    message.type === "result",
-                )
-              ) {
-                return true;
-              }
-            }
-            return false;
-          }),
+          hasPendingBackgroundWork: pendingBackgroundWork,
           hasPendingBackgroundWorkForThread: Effect.fn(
             "ClaudeAdapterV2.hasPendingBackgroundWorkForThread",
           )(function* (providerThread, options) {

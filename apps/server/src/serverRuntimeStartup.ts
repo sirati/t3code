@@ -17,6 +17,7 @@ import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -35,6 +36,7 @@ import * as LegacyV1ThreadImporter from "./orchestration-v2/legacy/LegacyV1Threa
 import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
 import * as ProviderRuntimeRecovery from "./orchestration-v2/ProviderRuntimeRecoveryService.ts";
 import * as ProviderSessionManager from "./orchestration-v2/ProviderSessionManager.ts";
+import * as SessionKeeper from "./provider/SessionKeeper.ts";
 import * as ThreadLaunch from "./orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagement from "./orchestration-v2/ThreadManagementService.ts";
 import * as ProjectService from "./project/ProjectService.ts";
@@ -454,6 +456,9 @@ const make = Effect.fn("serverRuntimeStartup.make")(function* (options?: Startup
   const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
   const crypto = yield* Crypto.Crypto;
   const launcher = yield* ServiceLauncherClient.ServiceLauncherClient;
+  const sessionKeeper = Option.getOrUndefined(
+    yield* Effect.serviceOption(SessionKeeper.SessionKeeper),
+  );
 
   const commandGate = yield* makeCommandGate;
   const httpListening = yield* Deferred.make<void>();
@@ -469,6 +474,8 @@ const make = Effect.fn("serverRuntimeStartup.make")(function* (options?: Startup
           cause: "Server runtime is shutting down.",
         }),
       );
+      // Before anything stops or interrupts turns: busy sessions keep running in their keepers.
+      if (sessionKeeper !== undefined) yield* sessionKeeper.detachBusy;
       const workerFiber = yield* Ref.getAndSet(effectWorkerFiber, null);
       if (workerFiber !== null) {
         yield* Fiber.interrupt(workerFiber).pipe(Effect.ignore);
@@ -542,7 +549,13 @@ const make = Effect.fn("serverRuntimeStartup.make")(function* (options?: Startup
           ),
         ),
       ),
-      recover: runStartupPhase("orchestration-v2.recovery", providerRuntimeRecovery.recover),
+      recover: runStartupPhase(
+        "orchestration-v2.recovery",
+        providerRuntimeRecovery.recover.pipe(
+          // Sessions kept across the restart continue once recovery has settled their runs.
+          Effect.tap(() => (sessionKeeper === undefined ? Effect.void : sessionKeeper.resumeKept)),
+        ),
+      ),
       recoverDelegatedTasks: runStartupPhase(
         "orchestration-v2.delegated-tasks.recover",
         orchestrator.recoverDelegatedTasks,

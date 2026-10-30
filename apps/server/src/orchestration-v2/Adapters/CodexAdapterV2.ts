@@ -40,6 +40,8 @@ import {
 } from "@t3tools/contracts";
 import { SKILL_MENTION_PATTERN } from "@t3tools/shared/composerInlineTokens";
 import { AgentScope } from "@t3tools/shared/AgentScope";
+import { SessionKeeper, type SessionActivity } from "../../provider/SessionKeeper.ts";
+import { keeperBackedHandle } from "../../provider/keeperProcess.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import {
   COMPUTER_USE_TOOL_SOURCE,
@@ -1297,6 +1299,8 @@ export interface CodexAppServerClientFactoryShape {
     readonly runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
     readonly settings: CodexSettings;
     readonly environment: NodeJS.ProcessEnv;
+    /** What the session is doing, so a busy one can outlive a server restart. */
+    readonly activity?: Effect.Effect<SessionActivity | undefined>;
   }) => Effect.Effect<
     CodexClient.CodexAppServerClient["Service"],
     ProviderAdapter.ProviderAdapterOpenSessionError,
@@ -1380,6 +1384,7 @@ export const makeCodexAppServerSpawnCommand = Effect.fn(
   readonly env?: NodeJS.ProcessEnv | undefined;
   readonly extendEnv?: boolean | undefined;
   readonly threadId?: string | undefined;
+  readonly survivesRestart?: boolean | undefined;
 }) {
   const launch = yield* (yield* AgentScope).wrap({
     command: input.command,
@@ -1388,6 +1393,7 @@ export const makeCodexAppServerSpawnCommand = Effect.fn(
     threadId: input.threadId,
     env: input.env,
     shared: true,
+    ...(input.survivesRestart === true ? { survivesRestart: true } : {}),
   });
   const spawnCommand = yield* resolveSpawnCommand(launch.command, launch.args, {
     ...(input.env === undefined ? {} : { env: input.env }),
@@ -1488,6 +1494,7 @@ export const layerAppServerClientFactory: Layer.Layer<
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const { native: nativeEventLogger } = yield* ProviderEventLoggers.ProviderEventLoggers;
     const agentScope = yield* AgentScope;
+    const sessionKeeper = Option.getOrUndefined(yield* Effect.serviceOption(SessionKeeper));
 
     return CodexAppServerClientFactory.of({
       open: Effect.fn("CodexAdapterV2.open")(function* (input) {
@@ -1496,15 +1503,40 @@ export const layerAppServerClientFactory: Layer.Layer<
           ...codexAppServerEnvironment(input.environment),
           ...(input.settings.homePath ? { CODEX_HOME: input.settings.homePath } : {}),
         };
-        const command = yield* makeCodexAppServerSpawnCommand({
-          command: input.settings.binaryPath || "codex",
-          args: codexAppServerArgs(
-            resolveCodexLaunchArgs(input.settings.launchArgs, input.environment),
-          ),
-          env: environment,
-          threadId: input.threadId,
-        }).pipe(Effect.provideService(AgentScope, agentScope));
-        const handle = yield* spawner.spawn(command).pipe(
+        const binary = input.settings.binaryPath || "codex";
+        const args = codexAppServerArgs(
+          resolveCodexLaunchArgs(input.settings.launchArgs, input.environment),
+        );
+        // With a keeper, the app-server runs under it and can outlive this server.
+        const keeperPath = sessionKeeper?.keeperPath;
+        const keeperSocket = sessionKeeper?.socketFor(input.providerSessionId);
+        const reattach = sessionKeeper?.takeReattach(input.providerSessionId);
+        const appServerCommand = makeCodexAppServerSpawnCommand(
+          keeperPath === undefined || keeperSocket === undefined
+            ? { command: binary, args, env: environment, threadId: input.threadId }
+            : {
+                command: keeperPath,
+                args: ["serve", keeperSocket, "--", binary, ...args],
+                env: environment,
+                threadId: input.threadId,
+                survivesRestart: true,
+              },
+        ).pipe(Effect.provideService(AgentScope, agentScope));
+        const command =
+          keeperPath === undefined || keeperSocket === undefined
+            ? yield* appServerCommand
+            : reattach !== undefined
+              ? ChildProcess.make(keeperPath, ["attach", keeperSocket], { env: environment })
+              : yield* appServerCommand.pipe(
+                  Effect.map((inner) =>
+                    ChildProcess.make(
+                      keeperPath,
+                      ["launch", keeperSocket, "--", inner.command, ...inner.args],
+                      inner.options,
+                    ),
+                  ),
+                );
+        const spawned = yield* spawner.spawn(command).pipe(
           Effect.provideService(Scope.Scope, scope),
           Effect.mapError(
             (cause) =>
@@ -1515,6 +1547,17 @@ export const layerAppServerClientFactory: Layer.Layer<
               }),
           ),
         );
+        const handle =
+          keeperSocket === undefined || sessionKeeper === undefined || keeperPath === undefined
+            ? spawned
+            : yield* keeperBackedHandle(spawned, {
+                keeper: sessionKeeper,
+                providerSessionId: input.providerSessionId,
+                driver: CODEX_PROVIDER,
+                socket: keeperSocket,
+                reattach,
+                activity: input.activity,
+              });
         const protocolLogger = makeCodexAppServerProtocolLogger({
           nativeEventLogger,
           threadId: input.threadId,
@@ -1620,6 +1663,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
     threadId === null ? Effect.succeed(undefined) : mcpSessions.read(threadId);
   const { clientFactory, crypto, fileSystem, idAllocator, serverConfig } = adapterOptions;
   const continuationRequests = adapterOptions.continuationRequests;
+  const sessionKeeper = Option.getOrUndefined(yield* Effect.serviceOption(SessionKeeper));
 
   return ProviderAdapter.ProviderAdapterV2.of({
     instanceId: adapterOptions.instanceId,
@@ -1646,7 +1690,12 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                     }),
                 ),
               );
+        // The session's turn state is defined further down; the factory reads it lazily.
+        let sessionActivity: Effect.Effect<SessionActivity | undefined> = Effect.sync(
+          () => undefined,
+        );
         const client = yield* clientFactory.open({
+          activity: Effect.suspend(() => sessionActivity),
           instanceId: adapterOptions.instanceId,
           threadId: input.threadId,
           providerSessionId: input.providerSessionId,
@@ -6716,6 +6765,49 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           ),
         };
 
+        const pendingBackgroundWork = Effect.gen(function* () {
+          for (const items of (yield* Ref.get(runningCommandItemsByTurn)).values()) {
+            if (items.size > 0) {
+              return true;
+            }
+          }
+          for (const items of (yield* Ref.get(runningDynamicToolsByTurn)).values()) {
+            if (items.size > 0) {
+              return true;
+            }
+          }
+          if ((yield* Ref.get(pendingMcpAppCaptures)).size > 0) {
+            return true;
+          }
+          for (const subagent of (yield* Ref.get(subagentThreads)).values()) {
+            if (subagent.task.status === "running") {
+              return true;
+            }
+          }
+          return false;
+        });
+        // A turn, a request, or background work in flight keeps the session through a restart.
+        sessionActivity = Effect.gen(function* () {
+          const roots = [...(yield* Ref.get(activeTurns)).values()].filter(
+            (turn) => turn.subagent === null,
+          );
+          const latest = roots.at(-1) ?? [...(yield* Ref.get(settledTurns)).values()].at(-1);
+          if (latest === undefined) return undefined;
+          const busy =
+            roots.length > 0 ||
+            (yield* Ref.get(pendingRootTurns)).size > 0 ||
+            (yield* Ref.get(pendingSubagentTurns)).size > 0 ||
+            (yield* Ref.get(pendingRuntimeRequests)).size > 0 ||
+            (yield* pendingBackgroundWork);
+          return {
+            busy,
+            threadId: latest.projectionThreadId,
+            providerThreadId: latest.providerThread.id,
+            nativeTurnIds: roots.map((turn) => turn.nativeTurnId),
+            // Codex does not wake by itself, so only a turn in flight needs a continuation run.
+            continueRun: roots.length > 0,
+          };
+        });
         const runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime = {
           instanceId: adapterOptions.instanceId,
           driver: CODEX_PROVIDER,
@@ -6724,27 +6816,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           events: Stream.fromEffectRepeat(Queue.take(events)),
           canReuseContextUsage: canReuseCodexContextUsage,
           // Idle release can beat delayed subagent resumes: Codex reports them completed between turns with no resume-expected signal.
-          hasPendingBackgroundWork: Effect.gen(function* () {
-            for (const items of (yield* Ref.get(runningCommandItemsByTurn)).values()) {
-              if (items.size > 0) {
-                return true;
-              }
-            }
-            for (const items of (yield* Ref.get(runningDynamicToolsByTurn)).values()) {
-              if (items.size > 0) {
-                return true;
-              }
-            }
-            if ((yield* Ref.get(pendingMcpAppCaptures)).size > 0) {
-              return true;
-            }
-            for (const subagent of (yield* Ref.get(subagentThreads)).values()) {
-              if (subagent.task.status === "running") {
-                return true;
-              }
-            }
-            return false;
-          }),
+          hasPendingBackgroundWork: pendingBackgroundWork,
           hasPendingBackgroundWorkForThread: Effect.fn(
             "CodexAdapterV2.hasPendingBackgroundWorkForThread",
           )(function* (providerThread) {
@@ -6923,6 +6995,24 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             ),
           ),
           startTurn: (turnInput) => {
+            // The continuation of a session kept across a restart picks up its turn in flight.
+            const kept =
+              turnInput.message.createdBy === "agent" &&
+              turnInput.message.creationSource === "provider"
+                ? sessionKeeper?.reattachedTurns(input.providerSessionId)
+                : undefined;
+            if (kept !== undefined) {
+              return Effect.gen(function* () {
+                const nativeTurnId = kept.nativeTurnIds[0];
+                if (nativeTurnId !== undefined) {
+                  yield* registerRootTurn({
+                    turnInput,
+                    nativeTurnId,
+                    startedAt: yield* DateTime.now,
+                  });
+                }
+              }).pipe(Effect.ensuring(kept.release));
+            }
             const goalCommand =
               turnInput.restartContinuationOfRunId === undefined
                 ? parseGoalCommand(turnInput.message)

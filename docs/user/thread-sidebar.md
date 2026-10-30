@@ -249,12 +249,23 @@ The environment must be running when the reset arrives; it resumes overdue
 continuations after a restart. Stopping the thread, sending a new message,
 archiving, or settling it prevents a pending continuation from starting.
 
+With a configured CLIProxyAPI usage source, **Resume when available** can also
+wait for the proxy to report that the failed route is available. Enable
+`routing.recovery-notifications: true` in the proxy and configure its management
+key in T3. Waiting does not send model requests. T3 reconnects interrupted
+notification subscriptions and keeps a reported reset time as a fallback.
+While a ticket is still waiting, reaching its reset time does not trigger a
+model request. The timer becomes a fallback if the ticket is missing or expired.
+The proxy's locally managed routing supports this feature; Home-managed
+instances do not. If the proxy restarts or a ticket expires without a reset
+time, continue the thread manually.
+
 Choose **Snooze until reset** to hide the thread until its allowance returns.
 Snooze and auto-resume are independent: snooze alone wakes the thread without
 sending a message; enabling both wakes and continues it. **Wake now** cancels
 the snooze. Enable **Snooze until limits reset** in thread behavior settings to
-snooze limit stops by default. Providers without a reset time offer manual
-retry and the normal snooze choices.
+snooze limit stops by default. Without a reset time, a proxy recovery ticket can
+still enable auto-resume; other providers offer manual retry and normal snooze.
 
 On web and desktop, use **Agents** to follow work delegated to subagents.
 On mobile, open a subagent from its conversation card or **Agents**. On iOS

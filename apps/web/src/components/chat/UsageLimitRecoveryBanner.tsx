@@ -16,6 +16,7 @@ import type { ComposerBannerStackItem } from "./ComposerBannerStack";
 type RecoveryProps = {
   runId: RunId;
   resetAt: string | null;
+  proxyRecoveryId?: string | null;
   stoppedAt: string;
   snoozedUntil: string | null;
   recovery: OrchestrationV2LimitRecovery | null;
@@ -25,7 +26,9 @@ type RecoveryProps = {
 
 export function usageLimitRecoveryBannerItem(props: RecoveryProps): ComposerBannerStackItem {
   const { runId, resetAt, stoppedAt, timestampFormat } = props;
-  const canSchedule = resetAt !== null && Date.parse(resetAt) > Date.parse(stoppedAt);
+  const canSchedule =
+    Boolean(props.proxyRecoveryId) ||
+    (resetAt !== null && Date.parse(resetAt) > Date.parse(stoppedAt));
   return {
     id: `usage-limit-recovery:${runId}`,
     variant: "warning",
@@ -33,12 +36,21 @@ export function usageLimitRecoveryBannerItem(props: RecoveryProps): ComposerBann
     title: "Usage limit reached",
     description: resetAt
       ? `Resets ${formatUpcomingTimestamp(resetAt, timestampFormat)}`
-      : "Reset time unavailable; retry manually",
+      : props.proxyRecoveryId
+        ? "Waiting for provider availability"
+        : "Reset time unavailable; retry manually",
     actions: canSchedule ? <RecoveryActions key={`${runId}:${resetAt}`} {...props} /> : null,
   };
 }
 
-function RecoveryActions({ runId, resetAt, recovery, snoozedUntil, onChange }: RecoveryProps) {
+function RecoveryActions({
+  runId,
+  resetAt,
+  proxyRecoveryId,
+  recovery,
+  snoozedUntil,
+  onChange,
+}: RecoveryProps) {
   const [pending, setPending] = useState(false);
 
   const scheduled =
@@ -55,8 +67,8 @@ function RecoveryActions({ runId, resetAt, recovery, snoozedUntil, onChange }: R
     Date.parse(snoozedUntil) === Date.parse(resetAt) &&
     !resetPassed;
   async function toggle(action: "resume" | "snooze") {
-    if (resetAt === null) return;
-    if (action === "snooze" && !snoozed && Date.parse(resetAt) <= Date.now()) {
+    if (resetAt === null && (!proxyRecoveryId || action === "snooze")) return;
+    if (action === "snooze" && resetAt !== null && !snoozed && Date.parse(resetAt) <= Date.now()) {
       toastManager.add({
         type: "error",
         title: "Could not snooze thread",
@@ -71,6 +83,7 @@ function RecoveryActions({ runId, resetAt, recovery, snoozedUntil, onChange }: R
       await onChange({
         runId,
         resetAt,
+        ...(proxyRecoveryId ? { proxyRecoveryId } : {}),
         ...(action === "resume" ? { autoResume: !scheduled } : { snooze: !snoozed }),
       });
     } catch (cause) {
@@ -86,12 +99,18 @@ function RecoveryActions({ runId, resetAt, recovery, snoozedUntil, onChange }: R
   return (
     <>
       <Button size="xs" variant="ghost" disabled={pending} onClick={() => void toggle("resume")}>
-        {pending ? "Saving..." : scheduled ? "Cancel auto-resume" : "Resume at reset"}
+        {pending
+          ? "Saving..."
+          : scheduled
+            ? "Cancel auto-resume"
+            : proxyRecoveryId
+              ? "Resume when available"
+              : "Resume at reset"}
       </Button>
       <Button
         size="xs"
         variant="ghost"
-        disabled={pending || (!snoozed && resetPassed)}
+        disabled={pending || resetAt === null || (!snoozed && resetPassed)}
         onClick={() => void toggle("snooze")}
       >
         {pending ? "Saving..." : snoozed ? "Wake now" : "Snooze until reset"}

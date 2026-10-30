@@ -1,0 +1,15 @@
+[package]
+name = "t3-session-keeper"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[dependencies]
+libc = "0.2.177"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+panic = "abort"
+strip = true

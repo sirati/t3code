@@ -1002,7 +1002,35 @@ export const DesktopPreviewRecordingSaveInputSchema = Schema.Struct({
 export const SystemSettingsPaneSchema = Schema.Literals(["full-disk-access"]);
 export type SystemSettingsPane = typeof SystemSettingsPaneSchema.Type;
 
+export type DesktopDictationEvent =
+  | {
+      kind: "offer";
+      session: string;
+      provider?: string;
+      audio?: { level: boolean; spectrum: boolean };
+    }
+  | { kind: "cancelled"; session: string }
+  | { kind: "timeout"; session: string; error?: string }
+  | { kind: "transcript"; session: string; text: string; submit: boolean }
+  | {
+      kind: "active";
+      session: string;
+      provider: string;
+      owned: boolean;
+      canMove: boolean;
+      phase: "recording" | "processing" | "delivering";
+      revision: number;
+      audio: { level: boolean; spectrum: boolean };
+    }
+  | { kind: "audio"; session: string; level: number | null; spectrum: number[] | null };
+
 export interface DesktopBridge {
+  dictation?: {
+    onEvent: (listener: (event: DesktopDictationEvent) => void) => () => void;
+    respond: (session: string, accept: boolean) => Promise<void>;
+    move: (session: string) => Promise<number>;
+    acknowledge: (session: string, applied: boolean, error: string | null) => Promise<void>;
+  };
   getAppBranding: () => DesktopAppBranding | null;
   getRelayTelemetryEnabled: () => boolean;
   getPathForFile: (file: File) => string;

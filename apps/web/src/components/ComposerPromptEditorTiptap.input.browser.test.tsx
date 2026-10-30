@@ -1,4 +1,8 @@
 import type { ComposerFileAttachment } from "../composerDraftStore";
+import { useComposerDraftStore } from "../composerDraftStore";
+import { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { captureComposerDictationDraft } from "../lib/composerDictation";
 import { formatInlineContextReference } from "../lib/composerContextReferences";
 import { fileContextReference } from "../lib/composerContextRecords";
 import {
@@ -17,6 +21,7 @@ import { act, fakeTimers, render } from "../../test/render";
 
 import { serializeEditorDoc } from "~/composer-rich-text-doc";
 import { isMacPlatform } from "~/lib/utils";
+import { captureDictationTarget } from "../lib/dictationTargets";
 import {
   ComposerPromptEditorTiptap as ComposerPromptEditor,
   type ComposerPromptEditorHandle,
@@ -436,4 +441,94 @@ describe("an Arabic line", () => {
       box.left + box.width / 2,
     );
   });
+});
+
+it("dictates into the captured composer selection and submits its original form after focus moves", async () => {
+  const changed = vi.fn();
+  const submitted = vi.fn((event: React.FormEvent) => event.preventDefault());
+  await using screen = await render(
+    <>
+      <form onSubmit={submitted}>{composer("hello world", true, [], changed)}</form>
+      <input aria-label="unrelated input" />
+    </>,
+  );
+  const editor = editorIn(screen.container);
+  editor.commands.setTextSelection({ from: 7, to: 12 });
+  editor.view.dom.focus();
+  const target = captureDictationTarget(document)!;
+  const unrelated = screen
+    .getByRole("textbox", { name: "unrelated input" })
+    .element() as HTMLInputElement;
+  unrelated.focus();
+  expect(target.apply("dictation", true)).toBe(true);
+  expect(editor.getText()).toBe("hello dictation");
+  expect(changed.mock.lastCall?.[0]).toBe("hello dictation");
+  expect(submitted).toHaveBeenCalledOnce();
+  expect(document.activeElement).toBe(unrelated);
+  target.dispose();
+});
+
+it("delivers dictation to the original draft after switching conversations and remounting its editor", async () => {
+  const originalRef = scopeThreadRef(
+    EnvironmentId.make("dictation-test"),
+    ThreadId.make("original"),
+  );
+  const otherRef = scopeThreadRef(EnvironmentId.make("dictation-test"), ThreadId.make("other"));
+  const store = useComposerDraftStore.getState();
+  store.setPrompt(originalRef, "original draft");
+  store.setPrompt(otherRef, "different draft");
+  const submitted = vi.fn();
+  const captureDictationDraft = () => captureComposerDictationDraft(originalRef, submitted);
+  const props = {
+    contextRecords: new Map(),
+    skills: [],
+    disabled: false,
+    placeholder: "",
+    editorRef: createRef<ComposerPromptEditorHandle>(),
+    onChange: vi.fn(),
+    onPaste: () => {},
+  };
+  await using screen = await render(
+    <ComposerPromptEditor
+      {...props}
+      draftKey="original-thread"
+      captureDictationDraft={captureDictationDraft}
+      value="original draft"
+      cursor={8}
+    />,
+  );
+  const original = editorIn(screen.container);
+  original.commands.setTextSelection({ from: 10, to: 15 });
+  original.view.dom.focus();
+  const target = captureDictationTarget(document)!;
+  await screen.rerender(
+    <ComposerPromptEditor
+      {...props}
+      draftKey="different-thread"
+      value="different draft"
+      cursor={0}
+    />,
+  );
+  expect(target.apply("late transcript", true)).toBe(true);
+  expect(store.getComposerDraft(originalRef)?.prompt).toBe("original late transcript");
+  expect(store.getComposerDraft(otherRef)?.prompt).toBe("different draft");
+  expect(submitted).toHaveBeenCalledExactlyOnceWith("original late transcript");
+  expect(editorIn(screen.container).getText()).toBe("different draft");
+  expect(props.onChange).not.toHaveBeenCalledWith(
+    expect.stringContaining("late transcript"),
+    expect.anything(),
+    expect.anything(),
+    expect.anything(),
+    expect.anything(),
+  );
+  target.dispose();
+  await screen.rerender(
+    <ComposerPromptEditor
+      {...props}
+      draftKey="original-thread"
+      value={store.getComposerDraft(originalRef)!.prompt}
+      cursor={0}
+    />,
+  );
+  expect(editorIn(screen.container).getText()).toBe("original late transcript");
 });

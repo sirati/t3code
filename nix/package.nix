@@ -22,6 +22,7 @@
   fetchPnpmDeps,
   t3code-pnpm,
   t3code-resource-monitor,
+  t3code-dictation-addon,
   git,
   pnpmConfigHook,
   cacert,
@@ -103,10 +104,12 @@ stdenv.mkDerivation (
         ;
 
       fetcherVersion = 4;
-      hash = "sha256-IO9xIHzN5Qk/a8GTctI5UbBmxL4pYBCmm6Nrio4eFZM=";
+      hash = "sha256-EEJRjJW07sHX+CrUynKYdMiAoh/YrmiBul0avjPIGD8=";
     };
 
     preBuild = ''
+      dictation_package=$(readlink -f apps/desktop/node_modules/@dictation-api/client)
+      cp ${t3code-dictation-addon}/lib/*.node "$dictation_package/bindings/node/"
       export pnpm_config_verify_deps_before_run=false
       export npm_config_nodedir=${nodejs}
       export ELECTRON_SKIP_BINARY_DOWNLOAD=1

@@ -58,7 +58,10 @@ in
     };
     pathPackages = mkOption {
       type = types.listOf types.package;
-      default = with pkgs; [ git ];
+      default = with pkgs; [
+        git
+        git-lfs
+      ];
     };
     keepActiveSessions = mkEnableOption "keeping agent sessions with work in flight running across service restarts";
   };

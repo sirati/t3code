@@ -194,6 +194,12 @@ export class EffectOutboxError extends Schema.TaggedError<EffectOutboxError>()(
 
 const isEffectOutboxError = Schema.is(EffectOutboxError);
 
+// Direct drains stay uncapped; the daemon reserves capacity for provider lifecycle work.
+export class BackgroundEffectLimit extends Context.Reference<number | undefined>(
+  "t3/orchestration-v2/EffectOutbox/BackgroundEffectLimit",
+  { defaultValue: () => undefined },
+) {}
+
 export interface EffectOutboxV2Shape {
   readonly awaitAvailable: Effect.Effect<void>;
   readonly notifyAvailable: (count?: number) => Effect.Effect<void>;
@@ -314,6 +320,7 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
     const claimableCandidatePredicate = (
       availableBefore?: string,
       excludeRestartContinuations = false,
+      backgroundLimit?: number,
     ) =>
       sql`
         ${
@@ -322,6 +329,18 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
             : sql`candidate.available_at <= ${availableBefore}`
         }
         AND candidate.status = 'pending'
+        AND ${
+          backgroundLimit === undefined
+            ? sql`1 = 1`
+            : sql`(
+                candidate.effect_type NOT IN ('checkpoint.capture', 'thread-title.generate')
+                OR (
+                  SELECT COUNT(*) FROM orchestration_v2_effect_outbox AS background
+                  WHERE background.status = 'running'
+                    AND background.effect_type IN ('checkpoint.capture', 'thread-title.generate')
+                ) < ${backgroundLimit}
+              )`
+        }
         AND NOT EXISTS (
           SELECT 1
           FROM orchestration_v2_effect_outbox AS active
@@ -520,6 +539,7 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
       // The worker polls for the next effect even when there is no work to claim.
       claimNext: Effect.fnUntraced(
         function* ({ workerId, excludeRestartContinuations = false }) {
+          const backgroundLimit = yield* BackgroundEffectLimit;
           const now = yield* DateTime.now;
           const nowIso = DateTime.formatIso(now);
           // Idle claims return empty; tracing their full SQL on every poll overwhelms useful traces.
@@ -534,7 +554,7 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
             WHERE effect_id = (
               SELECT candidate.effect_id
               FROM orchestration_v2_effect_outbox AS candidate
-              WHERE ${claimableCandidatePredicate(nowIso, excludeRestartContinuations)}
+              WHERE ${claimableCandidatePredicate(nowIso, excludeRestartContinuations, backgroundLimit)}
                 AND ${excludeRestartContinuations ? sql`candidate.effect_type != 'provider-runtime.continue'` : sql`1 = 1`}
               ORDER BY candidate.available_at ASC, candidate.created_at ASC, candidate.effect_id ASC
               LIMIT 1
@@ -550,10 +570,11 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
         Effect.mapError((cause) => new EffectOutboxError({ operation: "claim", cause })),
       ),
       nextClaimableAt: Effect.gen(function* () {
+        const backgroundLimit = yield* BackgroundEffectLimit;
         const rows = yield* sql<{ readonly available_at: string | null }>`
           SELECT MIN(candidate.available_at) AS available_at
           FROM orchestration_v2_effect_outbox AS candidate
-          WHERE ${claimableCandidatePredicate()}
+          WHERE ${claimableCandidatePredicate(undefined, false, backgroundLimit)}
         `.pipe(NodeSqliteClient.readOnly, Effect.withTracerEnabled(false));
         const availableAt = rows[0]?.available_at;
         if (availableAt === undefined || availableAt === null) return Option.none();

@@ -948,6 +948,11 @@ export const runDaemonWithOptions = (options: OrchestrationEffectDaemonOptions =
           concurrency: "unbounded",
           discard: true,
         },
+      ).pipe(
+        Effect.provideService(
+          EffectOutbox.BackgroundEffectLimit,
+          concurrency > 1 ? concurrency - 1 : undefined,
+        ),
       );
     }),
   );

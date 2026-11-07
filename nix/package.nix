@@ -25,6 +25,7 @@
   t3code-dictation-addon,
   t3code-session-keeper,
   git,
+  git-lfs,
   pnpmConfigHook,
   cacert,
 }:
@@ -168,6 +169,7 @@ stdenv.mkDerivation (
           lib.makeBinPath [
             nodejs
             git
+            git-lfs
           ]
         } \
         --add-flags "$out"/libexec/t3code/apps/server/dist/bin.mjs
@@ -179,6 +181,7 @@ stdenv.mkDerivation (
           lib.makeBinPath [
             nodejs
             git
+            git-lfs
           ]
         } \
         --inherit-argv0

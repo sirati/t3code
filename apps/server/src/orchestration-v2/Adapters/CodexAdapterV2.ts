@@ -2165,6 +2165,12 @@ export interface CodexAdapterV2Options {
   readonly watchCommandStops?: PortScanner.PortDiscovery["Service"]["watchAgentCommandStops"];
 }
 
+/** The kept native turns a reattached Codex session continues, and their release. */
+type KeptCodexTurns = {
+  readonly nativeTurnIds: ReadonlyArray<string>;
+  readonly release: Effect.Effect<void>;
+};
+
 export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
   adapterOptions: CodexAdapterV2Options,
 ) {
@@ -8254,6 +8260,40 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           );
         });
 
+        // A session kept across a restart already runs this turn; it is registered, not started.
+        const resumeKeptTurn = Effect.fn("CodexAdapterV2.resumeKeptTurn")(
+          function* (turnInput: ProviderAdapter.ProviderAdapterV2TurnInput, kept: KeptCodexTurns) {
+            // Older records mixed turns from different conversations in one list.
+            const nativeTurnId =
+              kept.nativeTurnIds[0] ??
+              (yield* client
+                .request("thread/read", {
+                  threadId: yield* getNativeThreadId(turnInput.providerThread),
+                  includeTurns: true,
+                })
+                .pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new ProviderAdapter.ProviderAdapterProtocolError({
+                        driver: CODEX_PROVIDER,
+                        detail: "Cannot read the retained Codex conversation.",
+                        cause,
+                      }),
+                  ),
+                )).thread.turns.at(-1)?.id;
+            if (nativeTurnId === undefined)
+              return yield* toProtocolError(
+                "The retained Codex conversation has no turn to resume.",
+              );
+            yield* registerRootTurn({
+              turnInput,
+              nativeTurnId,
+              startedAt: yield* DateTime.now,
+            });
+          },
+          (effect, _turnInput, kept) => effect.pipe(Effect.ensuring(kept.release)),
+        );
+
         /**
          * Setting or resuming a goal starts the first goal turn with this run's
          * turn configuration (approvals, sandbox, model, plan mode), since a
@@ -8527,6 +8567,14 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             threadId: latest.projectionThreadId,
             providerThreadId: latest.providerThread.id,
             nativeTurnIds: roots.map((turn) => turn.nativeTurnId),
+            consumers: [...new Set(roots.map((turn) => turn.providerThread.id))].map((id) => {
+              const turns = roots.filter((turn) => turn.providerThread.id === id);
+              return {
+                threadId: turns[0]!.projectionThreadId,
+                providerThreadId: id,
+                nativeTurnIds: turns.map((turn) => turn.nativeTurnId),
+              };
+            }),
             // Codex does not wake by itself, so only a turn in flight needs a continuation run.
             continueRun: roots.length > 0,
           };
@@ -8748,24 +8796,6 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           ),
           resumeTurn: (input) => runtime.startTurn(ProviderAdapter.resumeTurnInput(input)),
           startTurn: (turnInput) => {
-            // The continuation of a session kept across a restart picks up its turn in flight.
-            const kept =
-              turnInput.message.createdBy === "agent" &&
-              turnInput.message.creationSource === "provider"
-                ? sessionKeeper?.reattachedTurns(input.providerSessionId)
-                : undefined;
-            if (kept !== undefined) {
-              return Effect.gen(function* () {
-                const nativeTurnId = kept.nativeTurnIds[0];
-                if (nativeTurnId !== undefined) {
-                  yield* registerRootTurn({
-                    turnInput,
-                    nativeTurnId,
-                    startedAt: yield* DateTime.now,
-                  });
-                }
-              }).pipe(Effect.ensuring(kept.release));
-            }
             const continuation =
               turnInput.restartContinuationOfRunId !== undefined || turnInput.resume === true;
             const goalCommand = !continuation ? parseGoalCommand(turnInput.message) : null;
@@ -8773,6 +8803,17 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             const nativeThreadId = turnInput.providerThread.nativeThreadRef?.nativeId;
             return Effect.gen(function* () {
               yield* rejectIfRetired;
+              // The continuation of a session kept across a restart picks up its turn in flight.
+              const kept =
+                turnInput.restartContinuationOfRunId !== undefined ||
+                (turnInput.message.createdBy === "agent" &&
+                  turnInput.message.creationSource === "provider")
+                  ? sessionKeeper?.reattachedTurns(
+                      input.providerSessionId,
+                      turnInput.providerThread.id,
+                    )
+                  : undefined;
+              if (kept !== undefined) return yield* resumeKeptTurn(turnInput, kept);
               if (
                 !continuation &&
                 nativeThreadId != null &&

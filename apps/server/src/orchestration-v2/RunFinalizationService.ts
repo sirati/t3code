@@ -75,6 +75,8 @@ const make = Effect.gen(function* () {
     if (cwd !== undefined) {
       // Retrying a display refresh after the checkpoint is durable blocks the next turn.
       yield* observer.refresh({ cwd, threadId: input.threadId, runId: input.runId }).pipe(
+        Effect.timeout("10 seconds"),
+        Effect.mapError((cause) => new RunFinalizationRefreshError({ cwd, cause })),
         Effect.catchTags({
           RunFinalizationRefreshError: (cause) =>
             Effect.logWarning("Failed to refresh workspace after checkpoint capture", {

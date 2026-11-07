@@ -106,6 +106,98 @@ const layerTest = Layer.mergeAll(
   layerProjectionReplayProvided,
 );
 
+it.effect.each(["checkpoint.capture", "thread-title.generate", "mixed"] as const)(
+  "starts a provider while %s occupies the background workers",
+  (kind) =>
+    Effect.gen(function* () {
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const started = yield* Queue.unbounded<string>();
+      const commandId = CommandId.make("command:background-starvation");
+      const backgrounds = Array.from({ length: 5 }, (_, index) => ({
+        id: `effect:background:${index}`,
+        commandId,
+        threadId: ThreadId.make(`thread:background:${index}`),
+        request:
+          kind === "thread-title.generate" || (kind === "mixed" && index % 2 === 1)
+            ? ({ type: "thread-title.generate", kind: { type: "regenerate" } } as const)
+            : ({
+                type: "checkpoint.capture",
+                runId: RunId.make(`run:${index}`),
+                scopeId: CheckpointScopeId.make(`scope:${index}`),
+              } as const),
+      }));
+      yield* outbox.enqueue([
+        ...backgrounds,
+        {
+          id: "effect:provider",
+          commandId,
+          threadId: ThreadId.make("thread:provider"),
+          request: { type: "provider-turn.start", runId: RunId.make("run:provider") },
+        },
+      ]);
+      const workerLayer = EffectWorker.layer.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            Layer.succeed(EffectOutbox.EffectOutboxV2, outbox),
+            Layer.succeed(EffectWorker.OrchestrationEffectExecutorV2, {
+              execute: (effect) =>
+                Queue.offer(started, effect.request.type).pipe(Effect.andThen(Effect.never)),
+            }),
+          ),
+        ),
+      );
+      yield* Effect.gen(function* () {
+        yield* EffectWorker.runDaemon.pipe(Effect.forkScoped);
+        const claims = yield* Effect.forEach(Array.from({ length: 4 }), () => Queue.take(started));
+        assert.strictEqual(
+          claims.filter((claim) => claim === "provider-turn.start").length,
+          1,
+          "background effects occupied every worker before the provider start could run",
+        );
+      }).pipe(Effect.provide(workerLayer));
+    }).pipe(Effect.scoped, Effect.provide(layerIsolatedOutbox)),
+);
+
+it.effect("sleeps when background capacity is full and wakes when a capture settles", () =>
+  Effect.gen(function* () {
+    const outbox = yield* EffectOutbox.EffectOutboxV2;
+    const commandId = CommandId.make("command:background-capacity");
+    yield* outbox.enqueue(
+      Array.from({ length: 3 }, (_, index) => ({
+        id: `effect:capacity:${index}`,
+        commandId,
+        threadId: ThreadId.make(`thread:capacity:${index}`),
+        request:
+          index === 1
+            ? ({ type: "thread-title.generate", kind: { type: "regenerate" } } as const)
+            : ({
+                type: "checkpoint.capture",
+                runId: RunId.make(`run:${index}`),
+                scopeId: CheckpointScopeId.make(`scope:${index}`),
+              } as const),
+      })),
+    );
+    const workerId = "capacity-worker";
+    const cap = { maxRunningBackgroundEffects: 2 };
+    const claims = yield* Effect.all(
+      [outbox.claimNext({ workerId, ...cap }), outbox.claimNext({ workerId, ...cap })],
+      { concurrency: "unbounded" },
+    );
+    assert.isTrue(claims.every(Option.isSome));
+    assert.isTrue(Option.isNone(yield* outbox.claimNext({ workerId, ...cap })));
+    assert.isTrue(
+      Option.isNone(yield* outbox.nextClaimableAt(cap)),
+      "capped work must not cause a busy polling loop",
+    );
+    yield* outbox.fail({ effectId: "effect:capacity:0", workerId, error: "checkpoint failed" });
+    yield* outbox.awaitAvailable;
+    assert.isTrue(Option.isSome(yield* outbox.nextClaimableAt(cap)));
+    const resumed = yield* outbox.claimNext({ workerId, ...cap });
+    assert.isTrue(Option.isSome(resumed));
+    if (Option.isSome(resumed)) assert.strictEqual(resumed.value.id, "effect:capacity:2");
+  }).pipe(Effect.provide(layerIsolatedOutbox)),
+);
+
 const providerInstanceId = ProviderInstanceId.make("codex");
 const providerDriver = ProviderDriverKind.make("codex");
 const modelSelection = {
@@ -3073,7 +3165,7 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
   it.effect("holds pending titles at the running-title cap without waking idle workers", () =>
     Effect.gen(function* () {
       const outbox = yield* EffectOutbox.EffectOutboxV2;
-      const cap = { maxRunningTitleGenerations: 1 };
+      const cap = { maxRunningBackgroundEffects: 1 };
       const title = (name: string) => ({
         id: `effect:foundation-title-cap:${name}`,
         commandId: CommandId.make(`command:foundation-title-cap:${name}`),

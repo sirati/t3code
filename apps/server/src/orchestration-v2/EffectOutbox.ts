@@ -235,10 +235,10 @@ export interface EffectOutboxV2Shape {
   readonly claimNext: (input: {
     readonly workerId: string;
     readonly excludeRestartContinuations?: boolean;
-    readonly maxRunningTitleGenerations?: number;
+    readonly maxRunningBackgroundEffects?: number;
   }) => Effect.Effect<Option.Option<OrchestrationEffectV2>, EffectOutboxError>;
   readonly nextClaimableAt: (input?: {
-    readonly maxRunningTitleGenerations?: number;
+    readonly maxRunningBackgroundEffects?: number;
   }) => Effect.Effect<Option.Option<DateTime.Utc>, EffectOutboxError>;
   readonly succeed: (input: {
     readonly effectId: string;
@@ -328,7 +328,7 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
     const claimableCandidatePredicate = (
       availableBefore?: string,
       excludeRestartContinuations = false,
-      maxRunningTitleGenerations?: number,
+      maxRunningBackgroundEffects?: number,
     ) =>
       sql`
         ${
@@ -366,16 +366,16 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
             )
         )
         AND ${
-          maxRunningTitleGenerations === undefined
+          maxRunningBackgroundEffects === undefined
             ? sql`1 = 1`
             : sql`(
-                candidate.effect_type != 'thread-title.generate'
+                candidate.effect_type NOT IN ('checkpoint.capture', 'thread-title.generate')
                 OR (
                   SELECT COUNT(*)
-                  FROM orchestration_v2_effect_outbox AS running_title
-                  WHERE running_title.status = 'running'
-                    AND running_title.effect_type = 'thread-title.generate'
-                ) < ${maxRunningTitleGenerations}
+                  FROM orchestration_v2_effect_outbox AS background
+                  WHERE background.status = 'running'
+                    AND background.effect_type IN ('checkpoint.capture', 'thread-title.generate')
+                ) < ${maxRunningBackgroundEffects}
               )`
         }
       `;
@@ -547,7 +547,7 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
       ),
       // The worker polls for the next effect even when there is no work to claim.
       claimNext: Effect.fnUntraced(
-        function* ({ workerId, excludeRestartContinuations = false, maxRunningTitleGenerations }) {
+        function* ({ workerId, excludeRestartContinuations = false, maxRunningBackgroundEffects }) {
           const now = yield* DateTime.now;
           const nowIso = DateTime.formatIso(now);
           // Idle claims return empty; tracing their full SQL on every poll overwhelms useful traces.
@@ -565,7 +565,7 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
               WHERE ${claimableCandidatePredicate(
                 nowIso,
                 excludeRestartContinuations,
-                maxRunningTitleGenerations,
+                maxRunningBackgroundEffects,
               )}
                 AND ${excludeRestartContinuations ? sql`candidate.effect_type != 'provider-runtime.continue'` : sql`1 = 1`}
               ORDER BY candidate.available_at ASC, candidate.created_at ASC, candidate.effect_id ASC
@@ -583,12 +583,12 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
       ),
       nextClaimableAt: Effect.fnUntraced(
         function* ({
-          maxRunningTitleGenerations,
-        }: { readonly maxRunningTitleGenerations?: number } = {}) {
+          maxRunningBackgroundEffects,
+        }: { readonly maxRunningBackgroundEffects?: number } = {}) {
           const rows = yield* sql<{ readonly available_at: string | null }>`
             SELECT MIN(candidate.available_at) AS available_at
             FROM orchestration_v2_effect_outbox AS candidate
-            WHERE ${claimableCandidatePredicate(undefined, false, maxRunningTitleGenerations)}
+            WHERE ${claimableCandidatePredicate(undefined, false, maxRunningBackgroundEffects)}
           `.pipe(NodeSqliteClient.readOnly, Effect.withTracerEnabled(false));
           const availableAt = rows[0]?.available_at;
           if (availableAt === undefined || availableAt === null) return Option.none();

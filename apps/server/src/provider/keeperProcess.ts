@@ -194,7 +194,13 @@ export const keeperBackedHandle = Effect.fn("SessionKeeper.keeperBackedHandle")(
   const released =
     input.reattach === undefined
       ? undefined
-      : input.keeper.holdReattached(input.providerSessionId, input.reattach.nativeTurnIds);
+      : input.keeper.holdReattached(
+          input.providerSessionId,
+          input.reattach.nativeTurnIds,
+          input.reattach.continueRun
+            ? (input.reattach.consumers ?? [{ ...input.reattach, nativeTurnIds: [] }])
+            : [],
+        );
   const stdout =
     released === undefined
       ? tracked

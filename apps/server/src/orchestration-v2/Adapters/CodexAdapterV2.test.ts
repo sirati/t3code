@@ -72,6 +72,7 @@ import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter"
 import type * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
 import * as ModelManifest from "../../provider/ModelManifest.ts";
 import * as PortScanner from "../../preview/PortScanner.ts";
+import * as SessionKeeper from "../../provider/SessionKeeper.ts";
 import { resolveProviderCompatibility } from "../../provider/providerCompatibility.ts";
 import * as CodexAdapterV2 from "./CodexAdapterV2.ts";
 import { withCodexReplayChildMetadata } from "./CodexAdapterV2.testkit.ts";
@@ -963,14 +964,16 @@ describe("CodexAdapterV2 session initialize", () => {
         beforeEmitInbound === undefined ? {} : { beforeEmitInbound },
       );
       let initializeRequests = 0;
+      let activity: Effect.Effect<SessionKeeper.SessionActivity | undefined> = Effect.undefined;
       const adapter = yield* CodexAdapterV2.makeCodexAdapterV2({
         instanceId: CodexAdapterV2.CODEX_DEFAULT_INSTANCE_ID,
         settings: DEFAULT_CODEX_SETTINGS,
         environment: {},
         ...(compatibility === undefined ? {} : { compatibility }),
         clientFactory: {
-          open: (openInput) =>
-            Layer.build(CodexReplay.layerReplayWithDriver(driver)).pipe(
+          open: (openInput) => {
+            activity = openInput.activity ?? Effect.undefined;
+            return Layer.build(CodexReplay.layerReplayWithDriver(driver)).pipe(
               Effect.flatMap((context) =>
                 Effect.service(CodexClient.CodexAppServerClient).pipe(Effect.provide(context)),
               ),
@@ -992,7 +995,8 @@ describe("CodexAdapterV2 session initialize", () => {
                     cause,
                   }),
               ),
-            ),
+            );
+          },
         },
         digest: yield* Digest.Digest,
         fileSystem: yield* FileSystem.FileSystem,
@@ -1008,6 +1012,8 @@ describe("CodexAdapterV2 session initialize", () => {
         runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
       });
       return {
+        runtime,
+        activity: () => activity,
         ensureThread: (threadId: string) =>
           runtime.ensureThread({
             threadId: ThreadId.make(threadId),
@@ -1020,6 +1026,130 @@ describe("CodexAdapterV2 session initialize", () => {
 
   const replayPreamble = (nativeThreadId: string) =>
     codexReplayPreamble({ nativeThreadId, nativeTurnId: "unused", prompt: "unused" });
+
+  it.effect.each(["provider", "restart", "legacy"] as const)(
+    "adopts both shared-process turns without submitting empty input: %s",
+    (source) =>
+      Effect.gen(function* () {
+        const held = new Map<
+          ProviderThreadId,
+          { nativeTurnIds: string[]; release: Effect.Effect<void> }
+        >();
+        const released: string[] = [];
+        const keeper = Layer.mock(SessionKeeper.SessionKeeper)({
+          keeperPath: undefined,
+          socketFor: () => "unused",
+          register: () => () => {},
+          takeReattach: () => undefined,
+          keptThreadIds: () => new Set(),
+          holdReattached: () => Promise.resolve(),
+          whenReattached: () => undefined,
+          reattachedTurns: (_, id) => {
+            if (id === undefined) return undefined;
+            const value = held.get(id);
+            held.delete(id);
+            return value;
+          },
+        });
+        yield* Effect.gen(function* () {
+          const readKeptThread = (
+            name: string,
+            id: number,
+          ): Array<CodexReplay.CodexAppServerReplayEntry> => {
+            const entry = replayPreamble(`kept-${name}`)[4]!;
+            assert(
+              entry.type === "emit_inbound" &&
+                Predicate.isObject(entry.frame) &&
+                Predicate.isObject(entry.frame.result) &&
+                Predicate.isObject(entry.frame.result.thread),
+            );
+            return [
+              {
+                type: "expect_outbound",
+                label: "thread/read",
+                frame: {
+                  id,
+                  method: "thread/read",
+                  params: { threadId: `kept-${name}`, includeTurns: true },
+                },
+              },
+              {
+                type: "emit_inbound",
+                label: "thread/read",
+                frame: {
+                  id,
+                  result: {
+                    thread: {
+                      ...entry.frame.result.thread,
+                      turns: [makeCodexReplayTurn({ id: `turn-${name}`, status: "inProgress" })],
+                    },
+                  },
+                },
+              },
+            ];
+          };
+          const session = yield* openReplaySession(
+            makeCodexReplayTranscript({
+              scenario: "kept-shared-roots",
+              entries: [
+                ...replayPreamble("kept-first").slice(0, 5),
+                ...(source === "legacy" ? readKeptThread("first", 3) : []),
+                ...replayPreamble("kept-second")
+                  .slice(3, 5)
+                  .map((entry) => withReplayRequestId(entry, source === "legacy" ? 4 : 3)),
+                ...(source === "legacy" ? readKeptThread("second", 5) : []),
+              ],
+            }),
+          );
+          const expected = [];
+          for (const name of ["first", "second"]) {
+            const providerThread = yield* session.ensureThread(`app-${name}`);
+            const turnInput = makeCodexTestTurnInput({
+              threadId: ThreadId.make(`app-${name}`),
+              providerThread,
+              now: yield* DateTime.now,
+              attemptId: RunAttemptId.make(`adopt-${name}`),
+              text: "",
+            });
+            held.set(providerThread.id, {
+              nativeTurnIds: source === "legacy" ? [] : [`turn-${name}`],
+              release: Effect.sync(() => {
+                released.push(name);
+              }),
+            });
+            yield* session.runtime.startTurn({
+              ...turnInput,
+              ...(source === "restart"
+                ? { restartContinuationOfRunId: RunId.make(`old-${name}`) }
+                : {
+                    message: {
+                      ...turnInput.message,
+                      createdBy: "agent" as const,
+                      creationSource: "provider" as const,
+                    },
+                  }),
+            });
+            expected.push({
+              threadId: turnInput.threadId,
+              providerThreadId: providerThread.id,
+              nativeTurnIds: [`turn-${name}`],
+            });
+          }
+          assert.deepEqual((yield* session.activity())?.consumers, expected);
+          assert.deepEqual(released, ["first", "second"]);
+        }).pipe(Effect.provide(keeper));
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          Layer.mergeAll(
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+            NodeCrypto.layer,
+          ),
+        ),
+      ),
+  );
 
   it.effect("sends one initialize when two threads start on a fresh session at once", () =>
     Effect.gen(function* () {

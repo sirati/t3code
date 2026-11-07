@@ -7128,6 +7128,14 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             threadId: latest.projectionThreadId,
             providerThreadId: latest.providerThread.id,
             nativeTurnIds: roots.map((turn) => turn.nativeTurnId),
+            consumers: [...new Set(roots.map((turn) => turn.providerThread.id))].map((id) => {
+              const turns = roots.filter((turn) => turn.providerThread.id === id);
+              return {
+                threadId: turns[0]!.projectionThreadId,
+                providerThreadId: id,
+                nativeTurnIds: turns.map((turn) => turn.nativeTurnId),
+              };
+            }),
             // Codex does not wake by itself, so only a turn in flight needs a continuation run.
             continueRun: roots.length > 0,
           };
@@ -7332,20 +7340,43 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           startTurn: (turnInput) => {
             // The continuation of a session kept across a restart picks up its turn in flight.
             const kept =
-              turnInput.message.createdBy === "agent" &&
-              turnInput.message.creationSource === "provider"
-                ? sessionKeeper?.reattachedTurns(input.providerSessionId)
+              turnInput.restartContinuationOfRunId !== undefined ||
+              (turnInput.message.createdBy === "agent" &&
+                turnInput.message.creationSource === "provider")
+                ? sessionKeeper?.reattachedTurns(
+                    input.providerSessionId,
+                    turnInput.providerThread.id,
+                  )
                 : undefined;
             if (kept !== undefined) {
               return Effect.gen(function* () {
-                const nativeTurnId = kept.nativeTurnIds[0];
-                if (nativeTurnId !== undefined) {
-                  yield* registerRootTurn({
-                    turnInput,
-                    nativeTurnId,
-                    startedAt: yield* DateTime.now,
-                  });
-                }
+                // Older records mixed turns from different conversations in one list.
+                const nativeTurnId =
+                  kept.nativeTurnIds[0] ??
+                  (yield* client
+                    .request("thread/read", {
+                      threadId: yield* getNativeThreadId(turnInput.providerThread),
+                      includeTurns: true,
+                    })
+                    .pipe(
+                      Effect.mapError(
+                        (cause) =>
+                          new ProviderAdapter.ProviderAdapterProtocolError({
+                            driver: CODEX_PROVIDER,
+                            detail: "Cannot read the retained Codex conversation.",
+                            cause,
+                          }),
+                      ),
+                    )).thread.turns.at(-1)?.id;
+                if (nativeTurnId === undefined)
+                  return yield* toProtocolError(
+                    "The retained Codex conversation has no turn to resume.",
+                  );
+                yield* registerRootTurn({
+                  turnInput,
+                  nativeTurnId,
+                  startedAt: yield* DateTime.now,
+                });
               }).pipe(Effect.ensuring(kept.release));
             }
             const goalCommand =

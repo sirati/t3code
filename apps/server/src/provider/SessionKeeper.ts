@@ -86,6 +86,13 @@ export class PendingRequests {
 }
 
 /** What a busy session needs to continue on the next server. */
+const KeptConsumer = Schema.Struct({
+  threadId: ThreadId,
+  providerThreadId: ProviderThreadId,
+  nativeTurnIds: Schema.Array(Schema.String),
+});
+type KeptConsumer = typeof KeptConsumer.Type;
+
 const KeptSession = Schema.Struct({
   providerSessionId: ProviderSessionId,
   driver: ProviderDriverKind,
@@ -97,6 +104,7 @@ const KeptSession = Schema.Struct({
   pending: Schema.Array(Schema.String),
   /** Native turns in flight, for providers that must be told which turn they continue. */
   nativeTurnIds: Schema.Array(Schema.String),
+  consumers: Schema.optionalKey(Schema.Array(KeptConsumer)),
   /** Whether a continuation run picks the session up, or its next turn reattaches it. */
   continueRun: Schema.Boolean,
 });
@@ -110,6 +118,7 @@ export interface SessionActivity {
   readonly threadId: ThreadId;
   readonly providerThreadId: ProviderThreadId;
   readonly nativeTurnIds?: ReadonlyArray<string>;
+  readonly consumers?: ReadonlyArray<KeptConsumer>;
   /** False when no turn could carry what the provider does next; its next turn reattaches. */
   readonly continueRun?: boolean;
 }
@@ -144,12 +153,14 @@ export interface SessionKeeperShape {
   readonly holdReattached: (
     providerSessionId: ProviderSessionId,
     nativeTurnIds: ReadonlyArray<string>,
+    consumers?: ReadonlyArray<KeptConsumer>,
   ) => Promise<void>;
   /** Settles once a reattached session's continuation turn is attached; undefined otherwise. */
   readonly whenReattached: (providerSessionId: ProviderSessionId) => Promise<void> | undefined;
   /** The kept native turns a reattached session continues, taken once, and the release. */
   readonly reattachedTurns: (
     providerSessionId: ProviderSessionId,
+    providerThreadId?: ProviderThreadId,
   ) =>
     | { readonly nativeTurnIds: ReadonlyArray<string>; readonly release: Effect.Effect<void> }
     | undefined;
@@ -196,7 +207,10 @@ const make = Effect.gen(function* () {
   const sessions = new Map<ProviderSessionId, KeeperBackedSession>();
   const reattached = new Map<
     ProviderSessionId,
-    { readonly nativeTurnIds: ReadonlyArray<string>; readonly release: Effect.Effect<void> }
+    Map<
+      ProviderThreadId | undefined,
+      { readonly nativeTurnIds: ReadonlyArray<string>; readonly release: Effect.Effect<void> }
+    >
   >();
   const kept = new Map<ProviderSessionId, KeptSession>();
   const awaitingTurn = new Map<ProviderSessionId, Promise<void>>();
@@ -283,11 +297,12 @@ const make = Effect.gen(function* () {
       unit: session.unit ?? null,
       pending: session.pending?.lines() ?? [],
       nativeTurnIds: activity.nativeTurnIds ?? [],
+      ...(activity.consumers === undefined ? {} : { consumers: activity.consumers }),
       continueRun: activity.continueRun ?? true,
     };
     const file = NodePath.join(recordsDir, `${hash(session.providerSessionId)}.json`);
     NodeFS.writeFileSync(file, encodeKeptSession(record), { mode: 0o600 });
-    return activity.threadId;
+    return activity.consumers?.map((consumer) => consumer.threadId) ?? [activity.threadId];
   };
 
   return SessionKeeper.of({
@@ -310,33 +325,61 @@ const make = Effect.gen(function* () {
       if (keeperPath === undefined) return keptThreads;
       detachBusyNow();
       const detached = await Promise.all([...detaching.values()].map(recordDetached));
-      for (const threadId of detached) if (threadId !== undefined) keptThreads.add(threadId);
+      for (const threadIds of detached)
+        for (const threadId of threadIds ?? []) keptThreads.add(threadId);
       return keptThreads;
     }).pipe(Effect.withSpan("SessionKeeper.detachBusy")),
     keptThreadIds: () => keptThreads,
-    holdReattached: (providerSessionId, nativeTurnIds) => {
+    holdReattached: (providerSessionId, nativeTurnIds, consumers) => {
       let release = () => {};
       const released = new Promise<void>((resolve) => {
         release = resolve;
       });
       awaitingTurn.set(providerSessionId, released);
-      reattached.set(providerSessionId, {
-        nativeTurnIds,
-        release: Effect.sync(() => {
-          awaitingTurn.delete(providerSessionId);
-          release();
-        }),
-      });
+      const pending = new Set(
+        consumers?.map((consumer) => consumer.providerThreadId) ?? [undefined],
+      );
+      const entries = consumers?.map(
+        (consumer) => [consumer.providerThreadId, consumer.nativeTurnIds] as const,
+      ) ?? [[undefined, nativeTurnIds] as const];
+      reattached.set(
+        providerSessionId,
+        new Map(
+          entries.map(([id, ids]) => [
+            id,
+            {
+              nativeTurnIds: ids,
+              release: Effect.sync(() => {
+                pending.delete(id);
+                if (pending.size > 0) return;
+                reattached.delete(providerSessionId);
+                awaitingTurn.delete(providerSessionId);
+                release();
+              }),
+            },
+          ]),
+        ),
+      );
+      if (pending.size === 0) {
+        reattached.delete(providerSessionId);
+        awaitingTurn.delete(providerSessionId);
+        release();
+      }
       return released;
     },
     whenReattached: (providerSessionId) => awaitingTurn.get(providerSessionId),
-    reattachedTurns: (providerSessionId) => {
-      const turns = reattached.get(providerSessionId);
-      reattached.delete(providerSessionId);
+    reattachedTurns: (providerSessionId, providerThreadId) => {
+      const consumers = reattached.get(providerSessionId);
+      const turns = consumers?.get(providerThreadId);
+      consumers?.delete(providerThreadId);
       return turns;
     },
     resumeKept: Effect.forEach(
-      [...kept.values()].filter((session) => session.continueRun),
+      [...kept.values()]
+        .filter((session) => session.continueRun)
+        .flatMap((session) =>
+          (session.consumers ?? [session]).map((consumer) => ({ ...session, ...consumer })),
+        ),
       (session) =>
         Effect.logInfo("Continuing a provider session kept across the restart", {
           threadId: session.threadId,

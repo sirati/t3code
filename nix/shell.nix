@@ -7,6 +7,7 @@ pkgs.mkShell {
       t3code-pnpm
       t3code-electron
       git
+      git-lfs
       ripgrep
       jq
       python3

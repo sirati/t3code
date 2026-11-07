@@ -67,7 +67,10 @@ in
     };
     pathPackages = mkOption {
       type = types.listOf types.package;
-      default = with pkgs; [ git ];
+      default = with pkgs; [
+        git
+        git-lfs
+      ];
       description = "Executables providers and projects may need on PATH.";
     };
   };

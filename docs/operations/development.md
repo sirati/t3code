@@ -14,6 +14,7 @@ Open the pairing URL printed by the dev runner. The bare origin does not authent
 a new browser.
 
 Prefer a container? See [Dev container](../internals/devcontainer.md) for VS Code and Codespaces setup.
+For Nix and NixOS, see [Nix development and builds](nix.md).
 
 ## GitCafe mirror (optional)
 

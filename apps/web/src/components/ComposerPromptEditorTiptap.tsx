@@ -49,6 +49,7 @@ import {
   type RefObject,
 } from "react";
 import { EditorContent, useEditor } from "@tiptap/react";
+import { registerDictationTiptap } from "../lib/dictationTiptap";
 
 import {
   clampCollapsedComposerCursor,
@@ -147,6 +148,12 @@ export interface ComposerPromptEditorHandle {
 
 export interface ComposerPromptEditorProps {
   draftKey?: string;
+  captureDictationDraft?: () =>
+    | {
+        read(): string;
+        write(value: string, submit: boolean, contextIds: string[]): boolean;
+      }
+    | undefined;
   value: string;
   cursor: number;
   richTextEnabled?: boolean;
@@ -902,6 +909,7 @@ function ComposerPromptEditorTiptapInner(
   const latestValueRef = useRef(value);
   // The editor config is built once, so its handlers reach the current callbacks through here.
   const readCallbacks = useStableCallback(() => ({
+    captureDictationDraft: props.captureDictationDraft,
     onChange,
     onVisibleSelectionChange,
     onCommandKeyDown,
@@ -1416,6 +1424,24 @@ function ComposerPromptEditorTiptapInner(
   useEffect(() => {
     editor?.setEditable(!disabled);
   }, [disabled, editor]);
+
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Register the mounted editor with the dictation target registry until unmount.
+  useLayoutEffect(() => {
+    if (!editor) return;
+    return registerDictationTiptap(
+      editor,
+      () => {
+        const draft = readCallbacks().captureDictationDraft?.();
+        if (!draft) return undefined;
+        return (before, after, submit) => {
+          if (draft.read() !== serializeEditorDoc(before.doc).value) return false;
+          const { value, contextIds } = serializeEditorDoc(after.doc);
+          return draft.write(value, submit, [...contextIds]);
+        };
+      },
+      props.draftKey,
+    );
+  }, [editor, readCallbacks, props.draftKey]);
 
   // Push attributes before layout measurements; Tiptap updates them later in a passive effect.
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- pushes DOM attributes into the ProseMirror view before layout measurements read them

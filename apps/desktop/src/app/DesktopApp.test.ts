@@ -22,8 +22,10 @@ vi.mock("../ipc/DesktopIpcHandlers.ts", () => ({
 }));
 vi.mock("../updates/DesktopRemoteUpdates.ts", () => ({ listen: Effect.void }));
 vi.mock("./DesktopStartupRecovery.ts", () => ({ listen: Effect.void }));
+vi.mock("./DesktopDictation.ts", () => ({ start: () => Effect.void }));
 
 import * as DesktopApp from "./DesktopApp.ts";
+import * as DesktopAssets from "./DesktopAssets.ts";
 import * as DesktopAppActivation from "./DesktopAppActivation.ts";
 import * as DesktopAppIdentity from "./DesktopAppIdentity.ts";
 import * as DesktopClerk from "./DesktopClerk.ts";
@@ -92,6 +94,14 @@ it.effect.each([false, true])(
       const runApp = DesktopApp.program
         .pipe(
           Effect.provide(NodeCrypto.layer),
+          Effect.provideService(DesktopAssets.DesktopAssets, {
+            iconPaths: Effect.succeed({
+              ico: Option.none(),
+              icns: Option.none(),
+              png: Option.none(),
+            }),
+            resolveResourcePath: () => Effect.succeedNone,
+          }),
           Effect.provideService(DesktopAppIdentity.DesktopAppIdentity, {
             resolveUserDataPath: Effect.succeed("/isolated/userdata"),
             configure: record("identity"),

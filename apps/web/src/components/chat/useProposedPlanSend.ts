@@ -107,10 +107,12 @@ export function usePlanFollowUpSend(input: PlanFollowUpSendInput) {
     text,
     context,
     interactionMode: nextInteractionMode,
+    capturedSendContext,
   }: {
     text: string;
     context?: ReturnType<typeof buildMessageContext>;
     interactionMode: "default" | "plan";
+    capturedSendContext?: ReturnType<NonNullable<ComposerHandleRef["current"]>["getSendContext"]>;
   }) {
     if (
       !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope) ||
@@ -127,7 +129,7 @@ export function usePlanFollowUpSend(input: PlanFollowUpSendInput) {
       return false;
     }
 
-    const sendCtx = composerRef.current?.getSendContext();
+    const sendCtx = capturedSendContext ?? composerRef.current?.getSendContext();
     if (!sendCtx?.providerAvailable || !sendCtx.interactionModeEnabled) {
       return false;
     }
@@ -144,7 +146,7 @@ export function usePlanFollowUpSend(input: PlanFollowUpSendInput) {
     });
 
     sendInFlightRef.current = true;
-    beginLocalDispatch({ preparingWorktree: false });
+    if (!capturedSendContext) beginLocalDispatch({ preparingWorktree: false });
     setThreadError(threadIdForSend, null);
 
     anchorNewTurn(
@@ -213,7 +215,7 @@ export function usePlanFollowUpSend(input: PlanFollowUpSendInput) {
 
     if (failure === null) {
       sendInFlightRef.current = false;
-      resetLocalDispatch();
+      if (!capturedSendContext) resetLocalDispatch();
       return true;
     }
 
@@ -228,7 +230,7 @@ export function usePlanFollowUpSend(input: PlanFollowUpSendInput) {
       );
     }
     sendInFlightRef.current = false;
-    resetLocalDispatch();
+    if (!capturedSendContext) resetLocalDispatch();
     return false;
   };
 }

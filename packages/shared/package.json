@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./dictationSessionTargets": {
+      "types": "./src/dictationSessionTargets.ts",
+      "import": "./src/dictationSessionTargets.ts"
+    },
     "./changedFileKind": {
       "types": "./src/changedFileKind.ts",
       "import": "./src/changedFileKind.ts"

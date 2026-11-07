@@ -115,10 +115,11 @@ fn holds_output_while_detached_and_replays_it_on_attach() {
 #[test]
 fn delivers_an_exit_that_happened_while_detached() {
     let session = Session::new();
-    let script = "echo up; read line; while [ ! -e \"$1\" ]; do sleep 0.02; done; echo \"bye:$line\"; exit 3";
+    let script = "echo up; read line; echo \"received:$line\"; while [ ! -e \"$1\" ]; do sleep 0.02; done; echo \"bye:$line\"; exit 3";
     let mut first = session.launch(script);
     assert_eq!(first.line(), "up");
     first.send("x");
+    assert_eq!(first.line(), "received:x");
     first.signal(libc::SIGUSR1);
     assert_eq!(first.status().code(), Some(75));
     std::fs::write(&session.trigger, b"").unwrap();

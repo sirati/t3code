@@ -174,6 +174,16 @@ user's systemd manager; enable lingering if it must run without a login. Both
 services use `t3 serve`, which does not open a browser. Choose only one service
 for a given data directory and listener.
 
+With `keepActiveSessions = true;`, the Home Manager service keeps Claude and Codex
+sessions that are mid-turn, waiting on an approval, or running background work
+alive across a restart. Each provider runs under `t3-session-keeper`, which
+holds its output while no server is attached. The next server picks the turn
+up where it was, including the pending approval. Idle sessions stop as before.
+The option sets `T3CODE_KEEP_SESSIONS=1` and `KillMode=mixed`. The mixed kill
+mode is required: if systemd signals every process at once, the sessions end
+with the server. The system service has no such option, because kept sessions
+must leave the service's cgroup through the user manager's agent scopes.
+
 Manage these services through Nix and `systemctl` (or `systemctl --user`).
 Do not use `t3 service install` or `t3 update` to manage the Nix-provided unit;
 update the flake input and rebuild the configuration instead.

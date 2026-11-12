@@ -27,6 +27,7 @@ import { ProviderEventLoggers } from "@t3tools/provider-core/server/ProviderEven
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import { signalProcessGroup } from "@t3tools/provider-core/server/processGroup";
 import * as PortScanner from "../../preview/PortScanner.ts";
+import * as SessionKeeper from "../../provider/SessionKeeper.ts";
 import {
   ClaudeAgentSdkQueryRunner,
   type ClaudeAgentSdkQueryOpenInput,
@@ -699,19 +700,46 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("Claude CLI pro
   const rootRefusal =
     "--dangerously-skip-permissions cannot be used with root/sudo privileges for security reasons";
 
-  const startupFailureMessage = (stderr: string) =>
+  const startupFailureMessage = (stderr: string, kept = false) =>
     Effect.gen(function* () {
       const cli = fakeClaudeCli(`printf '%s\\n' '${stderr}' >&2\nexit 1`);
       yield* Effect.addFinalizer(() =>
         Effect.sync(() => NodeFS.rmSync(NodePath.dirname(cli), { recursive: true, force: true })),
       );
-      const session = yield* openFakeCli(cli);
+      const open = openFakeCli(cli);
+      const session = yield* kept
+        ? open.pipe(
+            Effect.provide(
+              realQueryRunner.pipe(
+                Layer.provide(
+                  Layer.mock(SessionKeeper.SessionKeeper)({
+                    keeperPath: cli,
+                    socketFor: () => NodePath.join(NodePath.dirname(cli), "keeper.sock"),
+                    takeReattach: () => undefined,
+                    register: () => () => {},
+                    keptThreadIds: () => new Set(),
+                    holdReattached: () => Promise.resolve(),
+                    whenReattached: () => undefined,
+                    reattachedTurns: () => undefined,
+                  }),
+                ),
+              ),
+            ),
+          )
+        : open;
       const exit = yield* Stream.runDrain(session.messages).pipe(Effect.exit);
       assert.isTrue(Exit.isFailure(exit));
       return Exit.isFailure(exit)
         ? makeProviderFailure({ cause: exit.cause, class: "transport_error" }).message
         : "";
     });
+
+  // The keeper forwards the CLI's stderr, so a kept CLI's root refusal still reaches the failure.
+  it.effect("reports the root refusal of a CLI started through the session keeper", () =>
+    Effect.gen(function* () {
+      assert.include(yield* startupFailureMessage(rootRefusal, true), rootRefusal);
+    }).pipe(Effect.provide(realQueryRunner)),
+  );
 
   // Startup stderr can carry paths, tokens, or settings, so only the known
   // refusal reaches the failure the client shows.

@@ -25,6 +25,7 @@ type RecoveryProps = {
   runId: RunId;
   errorCode: string | null;
   resetAt: string | null;
+  proxyRecoveryId?: string | null;
   stoppedAt: string;
   settled: boolean;
   requestPending: boolean;
@@ -48,7 +49,10 @@ export function usageLimitRecoveryBannerItem(props: RecoveryProps): ComposerBann
   } = props;
   // The server refuses recovery changes while a request is pending.
   const canSchedule =
-    !settled && !requestPending && resetAt !== null && Date.parse(resetAt) > Date.parse(stoppedAt);
+    !settled &&
+    !requestPending &&
+    (Boolean(props.proxyRecoveryId) ||
+      (resetAt !== null && Date.parse(resetAt) > Date.parse(stoppedAt)));
   const resumes =
     canSchedule && recovery?.runId === runId && recovery.resetAt === resetAt && recovery.autoResume;
   const workspaceLimit = errorCode === CHATGPT_WORKSPACE_USAGE_LIMIT_CODE;
@@ -62,7 +66,9 @@ export function usageLimitRecoveryBannerItem(props: RecoveryProps): ComposerBann
       : resetAt;
   const resetDescription = displayAt
     ? `${resumes ? "Resumes" : "Resets"} ${formatUpcomingTimestamp(displayAt, timestampFormat)}`
-    : "Reset time unavailable; retry manually";
+    : props.proxyRecoveryId
+      ? "Waiting for provider availability"
+      : "Reset time unavailable; retry manually";
   if (!chatGptLimit) {
     return {
       id: `usage-limit-recovery:${runId}`,
@@ -99,7 +105,14 @@ export function usageLimitRecoveryBannerItem(props: RecoveryProps): ComposerBann
   };
 }
 
-function RecoveryActions({ runId, resetAt, recovery, snoozedUntil, onChange }: RecoveryProps) {
+function RecoveryActions({
+  runId,
+  resetAt,
+  proxyRecoveryId,
+  recovery,
+  snoozedUntil,
+  onChange,
+}: RecoveryProps) {
   const [pending, setPending] = useState(false);
 
   const scheduled =
@@ -110,8 +123,8 @@ function RecoveryActions({ runId, resetAt, recovery, snoozedUntil, onChange }: R
   const snoozed =
     limitRecoveryOwnsSnooze({ runId, resetAt, recovery, snoozedUntil }) && !resetPassed;
   async function toggle(action: "resume" | "snooze") {
-    if (resetAt === null) return;
-    if (action === "snooze" && !snoozed && Date.parse(resetAt) <= Date.now()) {
+    if (resetAt === null && (!proxyRecoveryId || action === "snooze")) return;
+    if (action === "snooze" && resetAt !== null && !snoozed && Date.parse(resetAt) <= Date.now()) {
       toastManager.add({
         type: "error",
         title: "Could not snooze thread",
@@ -126,6 +139,7 @@ function RecoveryActions({ runId, resetAt, recovery, snoozedUntil, onChange }: R
       await onChange({
         runId,
         resetAt,
+        ...(proxyRecoveryId ? { proxyRecoveryId } : {}),
         ...(action === "resume" ? { autoResume: !scheduled } : { snooze: !snoozed }),
       });
     } catch (cause) {
@@ -141,11 +155,17 @@ function RecoveryActions({ runId, resetAt, recovery, snoozedUntil, onChange }: R
   return (
     <span className="flex flex-wrap items-center gap-x-3 gap-y-1 px-1">
       <InlineButton touchTarget="padded" disabled={pending} onClick={() => void toggle("resume")}>
-        {pending ? "Saving..." : scheduled ? "Cancel auto-resume" : "Resume at reset"}
+        {pending
+          ? "Saving..."
+          : scheduled
+            ? "Cancel auto-resume"
+            : proxyRecoveryId
+              ? "Resume when available"
+              : "Resume at reset"}
       </InlineButton>
       <InlineButton
         touchTarget="padded"
-        disabled={pending || (!snoozed && resetPassed)}
+        disabled={pending || resetAt === null || (!snoozed && resetPassed)}
         onClick={() => void toggle("snooze")}
       >
         {pending ? "Saving..." : snoozed ? "Wake now" : "Snooze until reset"}

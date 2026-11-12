@@ -4077,8 +4077,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       );
       const run = usageLimitBlockedRun(projection.runs, projection.turnItems, null);
       const failure = latestRootProviderFailure(run, projection.turnItems);
-      const resetMs = Date.parse(command.limitRecovery.resetAt);
-      if (command.limitRecovery.snooze === true && resetMs <= DateTime.toEpochMillis(now)) {
+      const resetMs =
+        command.limitRecovery.resetAt === null
+          ? Number.POSITIVE_INFINITY
+          : Date.parse(command.limitRecovery.resetAt);
+      if (
+        command.limitRecovery.snooze === true &&
+        (command.limitRecovery.resetAt === null || resetMs <= DateTime.toEpochMillis(now))
+      ) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
           commandType: command.type,
@@ -4086,13 +4092,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         });
       }
       if (
-        !Number.isFinite(resetMs) ||
+        (command.limitRecovery.resetAt !== null && !Number.isFinite(resetMs)) ||
+        (command.limitRecovery.resetAt === null && !command.limitRecovery.proxyRecoveryId) ||
         thread.archivedAt !== null ||
         thread.settledOverride === "settled" ||
         run?.id !== command.limitRecovery.runId ||
         failure?.class !== "usage_limit" ||
-        failure.resetAt !== command.limitRecovery.resetAt ||
-        resetMs <= DateTime.toEpochMillis(run.completedAt ?? run.requestedAt) ||
+        (failure.resetAt ?? null) !== command.limitRecovery.resetAt ||
+        failure.proxyRecoveryId !== command.limitRecovery.proxyRecoveryId ||
+        (!failure.proxyRecoveryId &&
+          resetMs <= DateTime.toEpochMillis(run.completedAt ?? run.requestedAt)) ||
         projection.runtimeRequests.some((request) => request.status === "pending")
       ) {
         return yield* new OrchestratorDispatchError({
@@ -4314,7 +4323,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         case "thread.metadata.update": {
           const previousRecovery =
             thread.limitRecovery?.runId === command.limitRecovery?.runId &&
-            thread.limitRecovery?.resetAt === command.limitRecovery?.resetAt
+            thread.limitRecovery?.resetAt === command.limitRecovery?.resetAt &&
+            thread.limitRecovery?.proxyRecoveryId === command.limitRecovery?.proxyRecoveryId
               ? thread.limitRecovery
               : null;
           const limitRecovery =
@@ -4335,9 +4345,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             ...(command.limitRecovery === undefined ? {} : { limitRecovery }),
             ...(command.limitRecovery !== undefined &&
             limitRecovery?.snooze === true &&
-            Date.parse(limitRecovery.resetAt) > DateTime.toEpochMillis(now)
+            Date.parse(limitRecovery.resetAt ?? "") > DateTime.toEpochMillis(now)
               ? {
-                  snoozedUntil: DateTime.makeUnsafe(limitRecovery.resetAt),
+                  snoozedUntil: DateTime.makeUnsafe(limitRecovery.resetAt!),
                   // Recovery updates acknowledge the same stopped run; their timestamps must not trigger fresh failure wakes.
                   snoozedAt: now,
                 }
@@ -4345,7 +4355,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                   thread.limitRecovery?.snooze &&
                   thread.snoozedUntil != null &&
                   DateTime.toEpochMillis(thread.snoozedUntil) ===
-                    Date.parse(thread.limitRecovery.resetAt)
+                    Date.parse(thread.limitRecovery.resetAt ?? "")
                 ? { snoozedUntil: null, snoozedAt: null, lastSnoozeWakeAt: now }
                 : {}),
             ...(command.branch === undefined ? {} : { branch: command.branch }),
@@ -6245,8 +6255,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         !recovery?.autoResume ||
         recovery.requestId !== command.usageLimitRecoveryRequestId ||
         recovery.runId !== run.id ||
-        recovery.resetAt !== failure.resetAt ||
-        Date.parse(recovery.resetAt) > DateTime.toEpochMillis(now) ||
+        recovery.resetAt !== (failure.resetAt ?? null) ||
+        recovery.proxyRecoveryId !== failure.proxyRecoveryId ||
+        (command.proxyRecoveryAvailableId !== undefined
+          ? command.proxyRecoveryAvailableId !== recovery.proxyRecoveryId
+          : recovery.resetAt === null ||
+            Date.parse(recovery.resetAt) <=
+              DateTime.toEpochMillis(run.completedAt ?? run.requestedAt) ||
+            Date.parse(recovery.resetAt) > DateTime.toEpochMillis(now)) ||
         projection.thread.archivedAt !== null ||
         projection.thread.deletedAt !== null ||
         projection.thread.settledOverride === "settled" ||
@@ -11880,13 +11896,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const failure = latestRootProviderFailure(latest, turnItems);
       if (
         failure?.class === "usage_limit" &&
-        failure.resetAt != null &&
-        Number.isFinite(Date.parse(failure.resetAt)) &&
-        (recovery?.runId !== latest.id || recovery.resetAt !== failure.resetAt)
+        (failure.proxyRecoveryId !== undefined ||
+          (failure.resetAt != null && Number.isFinite(Date.parse(failure.resetAt)))) &&
+        (recovery?.runId !== latest.id ||
+          recovery.resetAt !== (failure.resetAt ?? null) ||
+          recovery.proxyRecoveryId !== failure.proxyRecoveryId)
       ) {
         recovery = {
           runId: latest.id,
-          resetAt: failure.resetAt,
+          resetAt: failure.resetAt ?? null,
+          ...(failure.proxyRecoveryId ? { proxyRecoveryId: failure.proxyRecoveryId } : {}),
           autoResume: false,
           snooze: false,
         };
@@ -15284,7 +15303,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           // Stop or an explicit recovery choice can commit after the sweep reads its candidate.
           if (
             thread.limitRecovery?.runId === input.limitRecovery.runId &&
-            thread.limitRecovery.resetAt === input.limitRecovery.resetAt
+            thread.limitRecovery.resetAt === input.limitRecovery.resetAt &&
+            thread.limitRecovery.proxyRecoveryId === input.limitRecovery.proxyRecoveryId
           )
             return;
           const command = { type: "thread.metadata.update", ...input } as const;

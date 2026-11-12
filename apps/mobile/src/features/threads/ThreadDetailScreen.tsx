@@ -708,6 +708,7 @@ function ThreadDetailBody(
       recovery?.snooze === true &&
       recovery.runId === props.selectedThread.latestRun?.runId &&
       snoozedUntil !== null &&
+      recovery.resetAt !== null &&
       Date.parse(snoozedUntil) === Date.parse(recovery.resetAt);
     const result =
       action === "stop"
@@ -721,6 +722,7 @@ function ThreadDetailBody(
                   limitRecovery: {
                     runId: recovery.runId,
                     resetAt: recovery.resetAt,
+                    proxyRecoveryId: recovery.proxyRecoveryId,
                     snooze: false,
                   },
                 },

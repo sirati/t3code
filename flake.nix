@@ -1,12 +1,17 @@
 {
   description = "T3 Code development and source builds";
 
+  inputs.dictation-api.url = "github:sirati/dictation-api";
+  inputs.dictation-api.inputs.nixpkgs.follows = "nixpkgs";
+  inputs.dictation-api.inputs.nixpkgs-darwin-intel.follows = "nixpkgs-darwin-intel";
+
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
   inputs.nixpkgs-darwin-intel.url = "github:NixOS/nixpkgs/nixpkgs-26.05-darwin";
 
   outputs =
     {
       self,
+      dictation-api,
       nixpkgs,
       nixpkgs-darwin-intel,
     }:
@@ -60,6 +65,7 @@
           t3code-nodejs = tools.nodejs;
           t3code-pnpm = tools.pnpm;
           t3code-electron = prev.callPackage ./nix/electron.nix { };
+          t3code-dictation-addon = dictation-api.packages.${prev.stdenv.hostPlatform.system}.node-addon;
           t3code-resource-monitor = final.callPackage ./nix/resource-monitor.nix { inherit src; };
           t3code = final.callPackage ./nix/package.nix { inherit src; };
         };

@@ -261,6 +261,42 @@ export const layer: Layer.Layer<
         ),
       );
 
+    // Timeout fallbacks must not reacquire a workspace lock held by another capture.
+    const unavailableCheckpoint = Effect.fn("CheckpointService.unavailableCheckpoint")(function* (
+      input: Parameters<CheckpointServiceV2Shape["capture"]>[0],
+      status: "error" | "missing",
+      baseline = false,
+    ) {
+      yield* Effect.logWarning("Checkpoint operation deadline exceeded", {
+        scopeId: input.scope.id,
+      });
+      return makeCheckpoint({
+        id: yield* checkpointIdForScopeOrdinal(idAllocator, {
+          scopeId: input.scope.id,
+          ordinalWithinScope: input.ordinalWithinScope,
+        }),
+        scope: input.scope,
+        runId: input.runId,
+        nodeId: input.nodeId,
+        parentCheckpointId:
+          input.ordinalWithinScope > 0 && !baseline
+            ? yield* checkpointIdForScopeOrdinal(idAllocator, {
+                scopeId: input.scope.id,
+                ordinalWithinScope: input.ordinalWithinScope - 1,
+              })
+            : null,
+        ordinalWithinScope: input.ordinalWithinScope,
+        appRunOrdinal: input.appRunOrdinal,
+        ref: yield* checkpointRefFor({
+          scopeId: input.scope.id,
+          ordinalWithinScope: input.ordinalWithinScope,
+        }),
+        status,
+        files: [],
+        capturedAt: input.capturedAt,
+      });
+    });
+
     const captureBaseline: CheckpointServiceV2Shape["captureBaseline"] = (input) =>
       withWorkspaceLock(
         input.scope.cwd,
@@ -293,6 +329,7 @@ export const layer: Layer.Layer<
             );
         }),
       ).pipe(
+        Effect.timeout("10 seconds"),
         Effect.mapError(
           (cause) =>
             new CheckpointBaselineCaptureError({
@@ -351,6 +388,15 @@ export const layer: Layer.Layer<
             });
           }),
         ).pipe(
+          Effect.timeoutOrElse({
+            duration: "5 seconds",
+            orElse: () =>
+              unavailableCheckpoint(
+                { ...input, runId: null, appRunOrdinal: null },
+                "missing",
+                true,
+              ),
+          }),
           Effect.mapError(
             (cause) =>
               new CheckpointCaptureError({
@@ -510,6 +556,10 @@ export const layer: Layer.Layer<
           });
         }),
       ).pipe(
+        Effect.timeoutOrElse({
+          duration: "30 seconds",
+          orElse: () => unavailableCheckpoint(input, "error"),
+        }),
         Effect.mapError(
           (cause) =>
             new CheckpointCaptureError({

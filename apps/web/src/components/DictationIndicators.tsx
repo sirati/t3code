@@ -1,13 +1,13 @@
-import { useLayoutEffect, useRef, useState } from "react";
+import { useLayoutEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { useStore } from "zustand";
-import { AudioLines, ArrowDownToLine } from "lucide-react";
+import { AudioLines, ArrowDownToLine, XIcon } from "lucide-react";
 import { dictationState, type DictationSessionView } from "../lib/dictationState";
 import { dictationTargetId, isDictationElement } from "../lib/dictationTargets";
+import { VoiceInputPill, VoiceWaveform } from "./chat/VoiceInputPill";
 import { Button } from "./ui/button";
 import { Tooltip, TooltipTrigger, TooltipPopup } from "./ui/tooltip";
 import { observeResize } from "../lib/observeResize";
-import { observeVisibleAnimation } from "../lib/visibleAnimation";
 import { Spinner } from "./ui/spinner";
 
 interface Field {
@@ -21,61 +21,83 @@ interface Field {
   dock: HTMLElement | null;
 }
 
-function VoiceBars({ session, label }: { session: DictationSessionView; label: string }) {
-  const scaleRef = useRef<HTMLSpanElement>(null);
-  const smoothed = useRef(0);
-  const level = session.level ?? 0;
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Smooth provider loudness into a compositor transform, stopping near its target or when this field unmounts.
-  useLayoutEffect(() => {
-    if (session.phase !== "recording") return;
-    let frame = 0;
-    let previous = performance.now() - 1000 / 60;
-    const update = (now: number) => {
-      const keep = 0.85 ** (Math.max(0, now - previous) / (1000 / 60));
-      previous = now;
-      const next = smoothed.current * keep + level * (1 - keep);
-      const settled = Math.abs(next - level) < 0.0001;
-      smoothed.current = settled ? level : next;
-      if (scaleRef.current)
-        scaleRef.current.style.transform = `scaleY(${Math.max(1, 5 * smoothed.current)})`;
-      if (!settled && document.visibilityState === "visible") frame = requestAnimationFrame(update);
-    };
-    frame = requestAnimationFrame(update);
-    return () => cancelAnimationFrame(frame);
-  }, [level, session.phase]);
-  const title = session.moving
-    ? "Moving dictation here"
-    : session.phase === "processing"
-      ? "Processing dictation"
-      : session.phase === "delivering"
-        ? "Inserting dictation"
-        : !session.levelSupported
-          ? "Receiving dictation. This provider does not supply voice levels."
-          : "Receiving dictation";
+function dictationStatus(session: DictationSessionView) {
+  if (session.moving) return "Moving dictation here";
+  if (session.phase === "processing") return "Transcribing…";
+  if (session.phase === "delivering") return "Inserting…";
+  return session.levelSupported
+    ? "Recording"
+    : "Recording. This provider does not supply voice levels.";
+}
+
+const keepFocus = (event: { preventDefault(): void }) => event.preventDefault();
+
+// The composer gets the capsule in-app voice input uses, with the broker's provider in place of a timer.
+function DockedDictation({ session, label }: { session: DictationSessionView; label: string }) {
+  const status = dictationStatus(session);
+  const recording = session.phase === "recording" && !session.moving;
   return (
-    <span className="pointer-events-none flex h-6 w-10 items-center justify-center rounded-md bg-primary/10 text-primary">
-      {session.phase !== "recording" ? (
-        <Spinner size="md" aria-label={`${title}: ${label}`} />
-      ) : (
-        <span
-          role="img"
-          aria-label={`${title}: ${label}`}
-          ref={observeVisibleAnimation}
-          className="flex h-5 w-[38px] items-center"
+    <VoiceInputPill>
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <Button
+              type="button"
+              size="icon-sm-pill"
+              variant="ghost"
+              aria-label="Cancel dictation"
+              onPointerDown={keepFocus}
+              onClick={() => dictationState.getState().cancel?.(session.session)}
+              className="pointer-events-auto shrink-0"
+            />
+          }
         >
-          <span ref={scaleRef} className="flex h-0.5 items-center gap-0.5">
-            {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((index) => (
-              <span
-                key={index}
-                className="dictation-wave-bar block w-0.5 rounded-full bg-current"
-                style={{
-                  height: 2 * Math.max(0, 1 - (4.5 - index) ** 2 / 48),
-                  animationDelay: `${0.1 * (index < 5 ? index : index - 10) - 1}s`,
-                }}
-              />
-            ))}
-          </span>
-        </span>
+          <XIcon />
+        </TooltipTrigger>
+        <TooltipPopup side="top">Cancel dictation</TooltipPopup>
+      </Tooltip>
+      <div
+        role="status"
+        aria-live={recording ? "off" : "polite"}
+        aria-label={`${status}: ${label}`}
+        className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden pe-2.5"
+      >
+        {recording ? (
+          <>
+            <span aria-hidden className="size-2 shrink-0 rounded-full bg-destructive" />
+            <span className="min-w-0 truncate text-xs text-muted-foreground">
+              {session.provider}
+            </span>
+            {session.levelSupported ? (
+              <div className="flex w-16 min-w-0 shrink grow">
+                <VoiceWaveform level={session.level ?? 0} />
+              </div>
+            ) : null}
+          </>
+        ) : (
+          <>
+            <Spinner aria-hidden size="sm" tone="muted" className="shrink-0" />
+            <span className="min-w-0 truncate text-sm text-muted-foreground">{status}</span>
+          </>
+        )}
+      </div>
+    </VoiceInputPill>
+  );
+}
+
+// A plain field only has room for the level, drawn like the in-app waveform.
+function InlineDictation({ session, label }: { session: DictationSessionView; label: string }) {
+  const status = dictationStatus(session);
+  return (
+    <span
+      role="status"
+      aria-label={`${status}: ${label}`}
+      className="flex h-6 w-10 items-center justify-center overflow-hidden rounded-md bg-muted/48 px-1 ring-1 ring-border ring-inset"
+    >
+      {session.phase === "recording" && !session.moving ? (
+        <VoiceWaveform level={session.levelSupported ? (session.level ?? 0) : 0} />
+      ) : (
+        <Spinner aria-hidden size="sm" tone="muted" />
       )}
     </span>
   );
@@ -295,7 +317,11 @@ function ActiveDictationIndicators({ sessions }: { sessions: readonly DictationS
       >
         {visibleSessions.map((session) =>
           session.targetId === field.id ? (
-            <VoiceBars key={session.session} session={session} label={field.label} />
+            field.dock ? (
+              <DockedDictation key={session.session} session={session} label={field.label} />
+            ) : (
+              <InlineDictation key={session.session} session={session} label={field.label} />
+            )
           ) : session.canMove ? (
             <Tooltip key={session.session}>
               <TooltipTrigger

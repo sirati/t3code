@@ -72,3 +72,23 @@ it("drops a closed window's ownership and allows another window to explicitly re
     router.clear();
   }
 });
+
+it("lets any listening window cancel a session only after it was accepted", () => {
+  const router = new DesktopDictationRoutes(
+    () => {},
+    () => {},
+  );
+  try {
+    router.listen(1);
+    router.listen(2);
+    router.offer("session", 1, "Provider", { level: false, spectrum: false });
+    expect(router.visibleTo("session", 1)).toBe(false);
+    router.accept("session", 1, true);
+    expect(router.visibleTo("session", 2)).toBe(true);
+    expect(router.visibleTo("session", 3)).toBe(false);
+    router.end("session");
+    expect(router.visibleTo("session", 1)).toBe(false);
+  } finally {
+    router.clear();
+  }
+});

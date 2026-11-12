@@ -12,6 +12,7 @@ const eventChannel = "dictation:event";
 const responseChannel = "dictation:respond";
 const acknowledgementChannel = "dictation:acknowledge";
 const moveChannel = "dictation:move";
+const cancelChannel = "dictation:cancel";
 const { logError } = makeComponentLogger("desktop-dictation");
 
 function connectDictation(
@@ -86,6 +87,12 @@ function connectDictation(
     if (typeof session !== "string" || !listeners.has(event.sender.id))
       throw new Error("Invalid dictation destination");
     return routes.move(session, event.sender.id);
+  });
+  // The broker answers with a cancelled event, which ends the route everywhere.
+  ipcMain.handle(cancelChannel, async (event, session: unknown) => {
+    if (typeof session !== "string" || !routes.visibleTo(session, event.sender.id))
+      throw new Error("Invalid dictation session");
+    await client?.cancel(session);
   });
   ipcMain.handle(
     acknowledgementChannel,
@@ -173,6 +180,7 @@ function connectDictation(
       ipcMain.removeHandler(responseChannel);
       ipcMain.removeHandler(acknowledgementChannel);
       ipcMain.removeHandler(moveChannel);
+      ipcMain.removeHandler(cancelChannel);
       ipcMain.off("dictation:listen", listen);
       ipcMain.off("dictation:unlisten", unlisten);
       routes.clear();

@@ -15,4 +15,7 @@ export interface DictationSessionView {
 export const dictationState = createStore<{
   sessions: readonly DictationSessionView[];
   move: ((session: string, element: Element) => Promise<boolean>) | null;
-}>(() => ({ sessions: [], move: null }));
+  cancel: ((session: string) => void) | null;
+}>(() => ({ sessions: [], move: null, cancel: null }));
+
+export const dictationTargetIdForDraft = (draftKey: string) => `draft:${draftKey}`;

@@ -97,6 +97,23 @@ sees the recording, which runs in T3 Code itself.
 are down, and **Toggle** always needs a second press. Change the chord itself in
 [Keybindings settings](./keybindings.md).
 
+### System dictation broker
+
+The desktop app also accepts dictation from a
+[dictation-api](https://github.com/sirati/dictation-api) broker running in your
+session, so a dictation tool started outside T3 Code can type into it. The
+broker offers each dictation to the focused window, and T3 Code binds it to the
+field and selection that had focus. Its transcript lands there even after you
+switch threads. If that field is gone, T3 Code reports a failure to the broker
+instead of inserting the text elsewhere.
+
+While the broker records into the composer, the composer shows the same capsule
+as in-app voice input, with the dictation tool's name and level. Its × button
+cancels the dictation at the broker. In-app voice input waits until the broker
+dictation ends, and the broker's offers are declined while in-app voice input
+runs, so one draft never receives two transcripts at once. While recording,
+other fields offer a button to move the dictation there.
+
 ## Improve recognition
 
 - **Language** picks what you speak. **Auto** lets a multilingual model detect

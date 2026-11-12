@@ -111,6 +111,12 @@ export class DesktopDictationRoutes {
     return route.revision;
   }
 
+  // Every listening window shows an accepted session, so any of them may cancel it.
+  visibleTo(session: string, window: number) {
+    const route = this.sessions.get(session);
+    return route !== undefined && route.phase !== "offered" && this.listeners.has(window);
+  }
+
   audio(session: string, frame: { level: number | null; spectrum: number[] | null }) {
     const route = this.sessions.get(session);
     if (!route || route.phase !== "recording") return;

@@ -1137,6 +1137,8 @@ export interface DesktopBridge {
     respond: (session: string, accept: boolean) => Promise<void>;
     move: (session: string) => Promise<number>;
     acknowledge: (session: string, applied: boolean, error: string | null) => Promise<void>;
+    /** Ends the session at the broker; its provider discards the recording. */
+    cancel: (session: string) => Promise<void>;
   };
   getAppBranding: () => DesktopAppBranding | null;
   getDatabaseMigrationProgress?: () => Promise<DatabaseMigrationProgress | null>;

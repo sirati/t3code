@@ -34,3 +34,11 @@ In **Settings → Voice → Transcription**, filter by language, download a mode
 - **Microphone priority**: Rank built-in, wired, Bluetooth, and CarPlay (iOS) devices in **Settings → Voice**—T3 Code uses the first connected device in the list.
 - **Test**: Use **Test microphone** (local 10-second loopback, no transcription) to verify input, and **Test model** to preview raw transcription without cleanup.
 - Browser recording requires **HTTPS** or `localhost`—for plain-HTTP remote servers, use the desktop app.
+
+## System dictation broker (desktop)
+
+The desktop app also accepts dictation from a [dictation-api](https://github.com/sirati/dictation-api) broker running in your session, so a dictation tool started outside T3 Code can type into it.
+
+- The broker offers each dictation to the focused window. T3 Code binds it to the field and selection that had focus, so the transcript lands there even after you switch threads. If that field is gone, T3 Code reports a failure to the broker instead of inserting the text elsewhere.
+- While the broker records into the composer, the composer shows the voice input capsule with the dictation tool's name and level; its × cancels the dictation at the broker. Other fields offer a button to move the dictation there.
+- One draft never receives two transcripts at once: in-app voice input waits until a broker dictation ends, and the broker's offers are declined while in-app voice input runs.

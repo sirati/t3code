@@ -29,6 +29,7 @@ function installDictationBridge(rejectOffer = false) {
   type Listener = Parameters<NonNullable<DesktopBridge["dictation"]>["onEvent"]>[0];
   let deliver: Listener = () => {};
   const acknowledge = vi.fn(async () => {});
+  const cancel = vi.fn(async (_session: string) => {});
   const previous = Object.getOwnPropertyDescriptor(window, "desktopBridge");
   Object.defineProperty(window, "desktopBridge", {
     configurable: true,
@@ -45,12 +46,14 @@ function installDictationBridge(rejectOffer = false) {
         },
         move: async () => 1,
         acknowledge,
+        cancel,
       },
     },
   });
   return {
     deliver: (event: Parameters<Listener>[0]) => deliver(event),
     acknowledge,
+    cancel,
     [Symbol.dispose]() {
       if (previous) Object.defineProperty(window, "desktopBridge", previous);
       else Reflect.deleteProperty(window, "desktopBridge");
@@ -289,7 +292,7 @@ it("shows live bars in the saved field and moves the selection and submission on
     revision: 0,
     audio: { level: true, spectrum: true },
   });
-  const originalBars = page.getByRole("img", { name: "Receiving dictation: first", exact: true });
+  const originalBars = page.getByRole("status", { name: "Recording: first", exact: true });
   await expect.element(originalBars).toBeVisible();
   await bridge.deliver({
     kind: "audio",
@@ -297,13 +300,16 @@ it("shows live bars in the saved field and moves the selection and submission on
     level: 0.8,
     spectrum: [0.2, 0.4, 0.6, 0.8, 1],
   });
-  expect(originalBars.element().querySelectorAll(".dictation-wave-bar")).toHaveLength(10);
+  await vi.waitFor(() => {
+    const bars = originalBars.element().querySelectorAll<HTMLElement>("span");
+    expect(bars[bars.length - 1]?.style.transform).toBe("scaleY(0.8)");
+  });
   second.focus();
   second.setSelectionRange(6, 11);
   await expect.element(originalBars).toBeVisible();
   await page.getByRole("button", { name: "Move dictation here: second", exact: true }).click();
   await expect
-    .element(page.getByRole("img", { name: "Receiving dictation: second", exact: true }))
+    .element(page.getByRole("status", { name: "Recording: second", exact: true }))
     .toBeVisible();
   await expect
     .element(page.getByRole("button", { name: "Move dictation here: first", exact: true }))
@@ -398,9 +404,11 @@ it("docks composer dictation by its actions and reserves no text space for hidde
     audio: { level: true, spectrum: false },
   };
   await bridge.deliver(active);
-  const bars = page.getByRole("img", { name: "Receiving dictation: thread composer", exact: true });
+  const bars = page.getByRole("status", { name: "Recording: thread composer", exact: true });
   await expect.element(bars).toBeVisible();
   expect(bars.element().closest("[data-dictation-composer-controls]")).not.toBeNull();
+  await page.getByRole("button", { name: "Cancel dictation", exact: true }).click();
+  expect(bridge.cancel).toHaveBeenCalledWith("docked");
   expect(getComputedStyle(composer).paddingInlineEnd).toBe(originalComposerPadding);
   expect(composer.scrollHeight).toBe(originalComposerHeight);
   const move = page.getByRole("button", { name: "Move dictation here: other field", exact: true });
@@ -411,7 +419,7 @@ it("docks composer dictation by its actions and reserves no text space for hidde
   ).toBeLessThan(1);
   await bridge.deliver({ ...active, phase: "processing", canMove: false });
   const processing = page.getByRole("status", {
-    name: "Processing dictation: thread composer",
+    name: "Transcribing…: thread composer",
     exact: true,
   });
   await expect.element(processing).toBeVisible();
@@ -465,12 +473,8 @@ it("offers moves only for the new recording while the previous session is proces
   second.focus();
   await bridge.deliver({ kind: "offer", session: "new", audio: active.audio });
   await bridge.deliver({ ...active, session: "new" });
-  await expect
-    .element(page.getByRole("status", { name: "Processing dictation: first" }))
-    .toBeVisible();
-  await expect
-    .element(page.getByRole("img", { name: "Receiving dictation: second" }))
-    .toBeVisible();
+  await expect.element(page.getByRole("status", { name: "Transcribing…: first" })).toBeVisible();
+  await expect.element(page.getByRole("status", { name: "Recording: second" })).toBeVisible();
   await vi.waitFor(() =>
     expect(
       document.querySelectorAll('button[aria-label^="Move dictation here: third"]'),

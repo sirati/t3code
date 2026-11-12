@@ -1,6 +1,7 @@
 import type { Editor } from "@tiptap/core";
 import type { EditorState, Transaction } from "@tiptap/pm/state";
 import { flushSync } from "react-dom";
+import { dictationTargetIdForDraft } from "./dictationState";
 import { registerDictationEditor } from "./dictationTargets";
 
 type DetachedTarget = (before: EditorState, after: EditorState, submit: boolean) => boolean;
@@ -18,7 +19,7 @@ export function registerDictationTiptap(
   return registerDictationEditor(
     editor.view.dom,
     () => captureTiptapTarget(editor, captureDetached?.(), draftKey),
-    draftKey ? `draft:${draftKey}` : undefined,
+    draftKey ? dictationTargetIdForDraft(draftKey) : undefined,
   );
 }
 

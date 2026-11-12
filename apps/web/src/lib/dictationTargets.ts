@@ -242,7 +242,17 @@ export function startDictationTargets() {
     publish();
     return commitMove(session, entry);
   };
-  dictationState.setState({ move });
+  const cancel = (session: string) => {
+    bridge.cancel(session).catch((error: unknown) => {
+      console.error("Could not cancel dictation", { session, error });
+      toastManager.add({
+        type: "error",
+        title: "Could not cancel dictation",
+        description: "The session may already be finishing.",
+      });
+    });
+  };
+  dictationState.setState({ move, cancel });
   const unsubscribe = bridge.onEvent(async (event) => {
     if (event.kind === "offer") {
       const focused = document.activeElement;
@@ -338,6 +348,6 @@ export function startDictationTargets() {
     unsubscribe();
     sessions.clear();
     if (dictationState.getState().move === move)
-      dictationState.setState({ sessions: [], move: null });
+      dictationState.setState({ sessions: [], move: null, cancel: null });
   };
 }

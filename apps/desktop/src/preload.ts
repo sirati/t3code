@@ -218,6 +218,7 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     move: (session) => ipcRenderer.invoke("dictation:move", session),
     acknowledge: (session, applied, error) =>
       ipcRenderer.invoke("dictation:acknowledge", session, applied, error),
+    cancel: (session) => ipcRenderer.invoke("dictation:cancel", session),
   },
   getAppBranding: () => {
     const result = ipcRenderer.sendSync(IpcChannels.GET_APP_BRANDING_CHANNEL);

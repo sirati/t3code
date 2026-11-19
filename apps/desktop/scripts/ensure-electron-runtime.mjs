@@ -178,6 +178,14 @@ export function ensureElectronRuntime() {
   const electronPackageJson = JSON.parse(NodeFS.readFileSync(electronPackageJsonPath, "utf8"));
   const electronDir = NodePath.dirname(electronPackageJsonPath);
   const platformPath = getPlatformPath();
+  if (process.env.ELECTRON_OVERRIDE_DIST_PATH) {
+    const overridePath = NodePath.join(process.env.ELECTRON_OVERRIDE_DIST_PATH, platformPath);
+    if (!NodeFS.existsSync(overridePath)) {
+      throw new Error(`Electron override executable does not exist: ${overridePath}`);
+    }
+    repairPathFile(electronDir, platformPath);
+    return overridePath;
+  }
   const electronPath = NodePath.join(electronDir, "dist", platformPath);
   const needsInstall = () =>
     missingRuntimePaths(electronDir, platformPath).length > 0 ||

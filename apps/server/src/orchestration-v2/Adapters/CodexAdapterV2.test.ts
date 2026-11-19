@@ -3020,6 +3020,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             "features.concurrent_reasoning_summaries": true,
             "shell_environment_policy.set.T3CODE_THREAD_ID": `thread-${scenario}`,
             "mcp_servers.envprobe.env.T3CODE_THREAD_ID": `thread-${scenario}`,
+            "shell_environment_policy.set.HISTFILE": "",
             "mcp_servers.t3-code": {
               url: "http://127.0.0.1:43123/mcp",
               tool_timeout_sec: 3_900,

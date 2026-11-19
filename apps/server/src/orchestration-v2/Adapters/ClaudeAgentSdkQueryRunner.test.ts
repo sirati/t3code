@@ -1219,53 +1219,56 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("Claude CLI pro
     }),
   );
 
-  it.effect("marks the CLI's jobs with its thread and counts it as an agent until it exits", () => {
-    let runningAgents = 0;
-    let releaseAgent!: () => void;
-    const agentReleased = new Promise<void>((resolve) => (releaseAgent = resolve));
-    const runner = layerQueryRunner.pipe(
-      Layer.provide(
-        Layer.mock(PortScanner.PortDiscovery)({
-          trackAgent: () => {
-            runningAgents += 1;
-            return () => {
-              runningAgents -= 1;
-              releaseAgent();
-            };
-          },
-        }),
-      ),
-      Layer.provide(
-        Layer.succeed(ProviderEventLoggers, { native: undefined, canonical: undefined }),
-      ),
-      Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
-    );
-    return Effect.gen(function* () {
-      const cli = fakeClaudeCli(
-        [
-          'dir=$(dirname "$0")',
-          `printf '%s' "$${PortScanner.AGENT_THREAD_ENV}" > "$dir/thread"`,
-          "cat > /dev/null",
-        ].join("\n"),
+  it.effect(
+    "marks the CLI's jobs with its thread, keeps them out of shell history, and counts it as an agent until it exits",
+    () => {
+      let runningAgents = 0;
+      let releaseAgent!: () => void;
+      const agentReleased = new Promise<void>((resolve) => (releaseAgent = resolve));
+      const runner = layerQueryRunner.pipe(
+        Layer.provide(
+          Layer.mock(PortScanner.PortDiscovery)({
+            trackAgent: () => {
+              runningAgents += 1;
+              return () => {
+                runningAgents -= 1;
+                releaseAgent();
+              };
+            },
+          }),
+        ),
+        Layer.provide(
+          Layer.succeed(ProviderEventLoggers, { native: undefined, canonical: undefined }),
+        ),
+        Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
       );
-      const dir = NodePath.dirname(cli);
-      NodeChildProcess.execFileSync("mkfifo", [NodePath.join(dir, "thread")]);
-      yield* Effect.addFinalizer(() =>
-        Effect.sync(() => NodeFS.rmSync(dir, { recursive: true, force: true })),
-      );
-      const threadRead = new Promise<string>((resolve) => {
-        let thread = "";
-        NodeFS.createReadStream(NodePath.join(dir, "thread"), "utf8")
-          .on("data", (chunk) => (thread += chunk))
-          .once("end", () => resolve(thread));
-      });
+      return Effect.gen(function* () {
+        const cli = fakeClaudeCli(
+          [
+            'dir=$(dirname "$0")',
+            `printf '%s|%s' "$${PortScanner.AGENT_THREAD_ENV}" "\${HISTFILE-unset}" > "$dir/thread"`,
+            "cat > /dev/null",
+          ].join("\n"),
+        );
+        const dir = NodePath.dirname(cli);
+        NodeChildProcess.execFileSync("mkfifo", [NodePath.join(dir, "thread")]);
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => NodeFS.rmSync(dir, { recursive: true, force: true })),
+        );
+        const threadRead = new Promise<string>((resolve) => {
+          let thread = "";
+          NodeFS.createReadStream(NodePath.join(dir, "thread"), "utf8")
+            .on("data", (chunk) => (thread += chunk))
+            .once("end", () => resolve(thread));
+        });
 
-      const session = yield* openFakeCli(cli);
-      assert.equal(yield* Effect.promise(() => threadRead), "thread-fake-cli");
-      assert.equal(runningAgents, 1);
-      yield* session.close;
-      yield* Effect.promise(() => agentReleased);
-      assert.equal(runningAgents, 0);
-    }).pipe(Effect.provide(runner));
-  });
+        const session = yield* openFakeCli(cli);
+        assert.equal(yield* Effect.promise(() => threadRead), "thread-fake-cli|");
+        assert.equal(runningAgents, 1);
+        yield* session.close;
+        yield* Effect.promise(() => agentReleased);
+        assert.equal(runningAgents, 0);
+      }).pipe(Effect.provide(runner));
+    },
+  );
 });

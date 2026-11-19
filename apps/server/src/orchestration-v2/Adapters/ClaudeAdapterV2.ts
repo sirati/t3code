@@ -196,6 +196,7 @@ import {
 import * as ServerConfig from "../../config.ts";
 import { NativeTelemetryClient } from "../../resourceTelemetry/NativeTelemetryClient.ts";
 import * as PortScanner from "../../preview/PortScanner.ts";
+import { AGENT_SHELL_HISTORY_ENVIRONMENT } from "../../provider/agentShellHistory.ts";
 import * as ProcessRunner from "../../processRunner.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
@@ -1793,6 +1794,7 @@ export const layerQueryRunner: Layer.Layer<
               }
             : {}),
           [PortScanner.AGENT_THREAD_ENV]: input.threadId,
+          ...AGENT_SHELL_HISTORY_ENVIRONMENT,
         },
       };
       // The SDK can prepend a scope wrapper to native binaries; script entries run through node.

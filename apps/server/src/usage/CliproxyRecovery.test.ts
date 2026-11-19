@@ -2,7 +2,7 @@ import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as TestClock from "effect/testing/TestClock";
-import { make, RecoveryFetch } from "./CliproxyRecovery.ts";
+import { make, RecoveryFetch, routeAvailableInAuthFiles } from "./CliproxyRecovery.ts";
 
 const id = "K5wVx3M9Sq1zAx7B";
 const config = {
@@ -109,5 +109,95 @@ it.effect("matches the issuing hub and reconnects notifications after transport 
     assert.equal(yield* Fiber.join(waiting), "available");
     assert.equal(subscriptions, 2);
     assert.notInclude(requests, "other.test?watch=true");
+  }),
+);
+
+it("finds a free route in the proxy's account cooldowns", () => {
+  const now = Date.parse("2026-11-19T07:00:00Z");
+  const route = { provider: "claude", model: "claude-opus-5-5" };
+  const later = "2026-11-19T09:00:00Z";
+  const earlier = "2026-11-19T06:00:00Z";
+  const listing = (files: ReadonlyArray<unknown>) => ({ files });
+  assert.isFalse(
+    routeAvailableInAuthFiles(
+      listing([{ provider: "claude", cooldowns: [{ scope: "credential", retry_at: later }] }]),
+      route,
+      now,
+    ),
+  );
+  assert.isTrue(
+    routeAvailableInAuthFiles(
+      listing([{ provider: "claude", cooldowns: [{ scope: "credential", retry_at: earlier }] }]),
+      route,
+      now,
+    ),
+  );
+  // A cooldown on another model leaves this one free; one on this model does not.
+  const modelCooldown = (model: string) =>
+    listing([
+      { provider: "claude", cooldowns: [{ scope: "model", model_key: model, retry_at: later }] },
+    ]);
+  assert.isTrue(routeAvailableInAuthFiles(modelCooldown("claude-fable-5-2"), route, now));
+  assert.isFalse(routeAvailableInAuthFiles(modelCooldown("claude-opus-5-5"), route, now));
+  assert.isFalse(
+    routeAvailableInAuthFiles(
+      modelCooldown("claude-opus-5-5"),
+      { ...route, model: "claude-opus-5-5[1m]" },
+      now,
+    ),
+  );
+  // Other providers, disabled and unavailable accounts never count.
+  assert.isFalse(
+    routeAvailableInAuthFiles(listing([{ provider: "codex", cooldowns: [] }]), route, now),
+  );
+  assert.isFalse(
+    routeAvailableInAuthFiles(
+      listing([{ provider: "claude", disabled: true, cooldowns: [] }]),
+      route,
+      now,
+    ),
+  );
+  assert.isFalse(
+    routeAvailableInAuthFiles(listing([{ provider: "claude", unavailable: true }]), route, now),
+  );
+  assert.isTrue(
+    routeAvailableInAuthFiles(
+      listing([
+        { provider: "claude", cooldowns: [{ scope: "credential", retry_at: later }] },
+        { provider: "claude", status: "active", cooldowns: [] },
+      ]),
+      route,
+      now,
+    ),
+  );
+  assert.throws(() => routeAvailableInAuthFiles({ error: "nope" }, route, now));
+});
+
+it.effect("waits on the account listing once the proxy has forgotten a ticket", () =>
+  Effect.gen(function* () {
+    let reads = 0;
+    const service = yield* make.pipe(
+      Effect.provideService(RecoveryFetch, async (input, init) => {
+        assert.equal(String(input), "https://hub.test/v0/management/auth-files");
+        assert.equal(new Headers(init?.headers).get("authorization"), "Bearer test-key");
+        reads++;
+        const cooling = reads < 2;
+        return Response.json({
+          files: [
+            {
+              provider: "claude",
+              cooldowns: cooling ? [{ scope: "credential", retry_at: "2999-01-01T00:00:00Z" }] : [],
+            },
+          ],
+        });
+      }),
+    );
+    const fiber = yield* service
+      .waitForRoute([config], { provider: "claude", model: "claude-opus-5-5" })
+      .pipe(Effect.forkChild);
+    yield* Effect.yieldNow;
+    yield* TestClock.adjust("16 seconds");
+    assert.equal(yield* Fiber.join(fiber), "available");
+    assert.equal(reads, 2);
   }),
 );

@@ -268,10 +268,14 @@ wait for the proxy to report that the failed route is available. Enable
 key in T3. Waiting does not send model requests. T3 reconnects interrupted
 notification subscriptions and keeps a reported reset time as a fallback.
 While a ticket is still waiting, reaching its reset time does not trigger a
-model request. The timer becomes a fallback if the ticket is missing or expired.
-The proxy's locally managed routing supports this feature; Home-managed
-instances do not. If the proxy restarts or a ticket expires without a reset
-time, continue the thread manually.
+model request. The proxy keeps tickets in memory for 24 hours, so a proxy
+restart or a long wait loses them. For Claude and Codex threads, T3 then watches
+the proxy's account cooldowns instead and resumes once an account can serve the
+thread's model again; the reset time stays a fallback. When one freed route
+unblocks several threads, T3 resumes them one every ten seconds until all have
+continued. The proxy's locally managed routing supports this feature;
+Home-managed instances do not. Other providers whose ticket is lost without a
+reset time need a manual continue.
 
 Choose **Snooze until reset** to hide the thread until its allowance returns.
 Snooze and auto-resume are independent: snooze alone wakes the thread without

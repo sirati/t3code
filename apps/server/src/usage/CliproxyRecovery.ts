@@ -1,4 +1,5 @@
 import type { UsageLimitSourceConfig } from "@t3tools/contracts";
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -36,8 +37,75 @@ export class CliproxyRecovery extends Context.Service<
       sources: ReadonlyArray<UsageLimitSourceConfig>,
       id: string,
     ) => Effect.Effect<"available" | "expired", CliproxyRecoveryError>;
+    /** Settles once some account of the route's provider can serve its model again. */
+    readonly waitForRoute: (
+      sources: ReadonlyArray<UsageLimitSourceConfig>,
+      route: RecoveryRoute,
+    ) => Effect.Effect<"available">;
   }
 >()("t3/usage/CliproxyRecovery") {}
+
+/** The proxy provider and model a paused turn needs, for when its ticket is gone. */
+export interface RecoveryRoute {
+  readonly provider: string;
+  readonly model: string | undefined;
+}
+
+// Several paused threads poll the same listing; one read serves them all for this long.
+const AUTH_FILES_CACHE_MS = 10_000;
+const ROUTE_POLL_INTERVAL = "15 seconds";
+
+const canonicalModel = (model: string) =>
+  model
+    .replace(/\[[^\]]*\]$/, "")
+    .trim()
+    .toLowerCase();
+
+/**
+ * Whether the proxy's account listing has an account of the route's provider with no
+ * active cooldown for the route's model. A cooldown without a readable end counts as active.
+ */
+export function routeAvailableInAuthFiles(value: unknown, route: RecoveryRoute, nowMs: number) {
+  if (typeof value !== "object" || value === null || !("files" in value)) {
+    throw new Error("Invalid auth files response");
+  }
+  const files: unknown = value.files;
+  if (!Array.isArray(files)) throw new Error("Invalid auth files response");
+  const model = route.model === undefined ? undefined : canonicalModel(route.model);
+  const active = (cooldown: unknown) => {
+    if (typeof cooldown !== "object" || cooldown === null) return false;
+    const until =
+      "retry_at" in cooldown && typeof cooldown.retry_at === "string"
+        ? Date.parse(cooldown.retry_at)
+        : Number.NaN;
+    if (Number.isFinite(until) && until <= nowMs) return false;
+    if (!("scope" in cooldown) || cooldown.scope === "credential") return true;
+    return (
+      cooldown.scope === "model" &&
+      model !== undefined &&
+      "model_key" in cooldown &&
+      typeof cooldown.model_key === "string" &&
+      canonicalModel(cooldown.model_key) === model
+    );
+  };
+  return files.some((file: unknown) => {
+    if (typeof file !== "object" || file === null) return false;
+    const account = file as Record<string, unknown>;
+    if (account.provider !== route.provider) return false;
+    if (account.disabled === true || account.status === "disabled" || account.unavailable === true)
+      return false;
+    const cooldowns: unknown = account.cooldowns;
+    return !Array.isArray(cooldowns) || !cooldowns.some(active);
+  });
+}
+
+function authFilesUrl(config: UsageLimitSourceConfig) {
+  const url = new URL(config.url);
+  url.pathname = `${url.pathname.replace(/\/(?:v[08]\/management)?\/?$/, "")}/v0/management/auth-files`;
+  url.search = "";
+  url.hash = "";
+  return url;
+}
 
 function recoveryUrl(config: UsageLimitSourceConfig, id: string, watch = false) {
   if (!/^[A-Za-z0-9_-]{16}$/.test(id)) throw new Error("Invalid recovery identifier");
@@ -177,7 +245,57 @@ export const make = Effect.gen(function* () {
     },
     Effect.retry(Schedule.spaced("5 seconds")),
   );
-  return CliproxyRecovery.of({ lookup, watch, wait });
+  const listings = new Map<string, { readonly at: number; readonly body: Promise<unknown> }>();
+  const readAuthFiles = (config: UsageLimitSourceConfig, nowMs: number) =>
+    Effect.tryPromise({
+      try: (signal) => {
+        const key = `${config.url}\u0000${config.managementKey}`;
+        const cached = listings.get(key);
+        if (cached !== undefined && nowMs - cached.at < AUTH_FILES_CACHE_MS) return cached.body;
+        const body = fetchRecovery(authFilesUrl(config), {
+          headers: { Authorization: `Bearer ${config.managementKey}` },
+          signal: AbortSignal.any([signal, AbortSignal.timeout(15_000)]),
+          redirect: "error",
+        }).then(async (response) => {
+          if (!response.ok) {
+            await response.body?.cancel();
+            throw new Error("Account listing rejected");
+          }
+          return (await response.json()) as unknown;
+        });
+        listings.set(key, { at: nowMs, body });
+        body.catch(() => listings.delete(key));
+        return body;
+      },
+      catch: (cause) => new CliproxyRecoveryError({ operation: "lookup", cause }),
+    });
+  const routeAvailable = Effect.fn("CliproxyRecovery.routeAvailable")(function* (
+    sources: ReadonlyArray<UsageLimitSourceConfig>,
+    route: RecoveryRoute,
+  ) {
+    const nowMs = yield* Clock.currentTimeMillis;
+    for (const source of sources) {
+      if (!source.enabled || !source.managementKey) continue;
+      const listing = yield* readAuthFiles(source, nowMs).pipe(Effect.option);
+      if (listing._tag === "None") continue;
+      const available = yield* Effect.try({
+        try: () => routeAvailableInAuthFiles(listing.value, route, nowMs),
+        catch: (cause) => new CliproxyRecoveryError({ operation: "decode", cause }),
+      }).pipe(Effect.orElseSucceed(() => false));
+      if (available) return true;
+    }
+    return false;
+  });
+  // A ticket lives in the proxy's memory, so a proxy restart or its 24-hour expiry loses it.
+  // The proxy's own account cooldowns then tell when the route frees up.
+  const waitForRoute = Effect.fn("CliproxyRecovery.waitForRoute")(function* (
+    sources: ReadonlyArray<UsageLimitSourceConfig>,
+    route: RecoveryRoute,
+  ) {
+    while (!(yield* routeAvailable(sources, route))) yield* Effect.sleep(ROUTE_POLL_INTERVAL);
+    return "available" as const;
+  });
+  return CliproxyRecovery.of({ lookup, watch, wait, waitForRoute });
 });
 
 export const layer = Layer.effect(CliproxyRecovery, make);

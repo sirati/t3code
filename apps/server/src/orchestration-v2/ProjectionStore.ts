@@ -201,7 +201,12 @@ export type ProjectionLimitRecoveryCandidate = Pick<
   | "updatedAt"
   | "limitRecovery"
   | "snoozedUntil"
-> & { readonly proxyRecoveryId?: string | null | undefined };
+> & {
+  readonly proxyRecoveryId?: string | null | undefined;
+  /** Where the failed turn ran, so a lost proxy ticket can fall back to account cooldowns. */
+  readonly providerInstanceId?: string | undefined;
+  readonly model?: string | undefined;
+};
 
 export type ProjectionThreadPullRequests = Pick<
   OrchestrationV2AppThread,
@@ -5012,6 +5017,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             pendingRuntimeRequest: null,
             limitRecovery: thread.limitRecovery ?? null,
             snoozedUntil: thread.snoozedUntil ?? null,
+            providerInstanceId: thread.providerInstanceId,
+            model: thread.modelSelection.model,
           });
         }
         return candidates;

@@ -97,6 +97,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Function from "effect/Function";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
 import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
@@ -108,6 +109,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import { resolveAttachmentPath, resolveAttachmentPathById } from "../../attachmentStore.ts";
 import * as PortScanner from "../../preview/PortScanner.ts";
+import { DevShellEnvironment } from "../../provider/DevShellEnvironment.ts";
 import { getCodexServiceTierOptionValue } from "../../codexModelOptions.ts";
 import { ServerConfig } from "../../config.ts";
 import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
@@ -1769,11 +1771,13 @@ export const layerAppServerClientFactory: Layer.Layer<
     const { native: nativeEventLogger } = yield* ProviderEventLoggers.ProviderEventLoggers;
     const agentScope = yield* AgentScope;
     const portDiscovery = yield* PortScanner.PortDiscovery;
+    const devShells = Option.getOrUndefined(yield* Effect.serviceOption(DevShellEnvironment));
 
     return CodexAppServerClientFactory.of({
       open: Effect.fn("CodexAdapterV2.open")(function* (input) {
         const scope = yield* Scope.Scope;
         const environment = {
+          ...devShells?.environment,
           ...codexAppServerEnvironment(input.environment),
           ...(input.settings.homePath ? { CODEX_HOME: input.settings.homePath } : {}),
         };
@@ -1813,9 +1817,24 @@ export const layerAppServerClientFactory: Layer.Layer<
                 logger: protocolLogger,
               };
         const context = yield* Layer.build(CodexClient.layerChildProcess(handle, clientOptions));
-        return yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
+        const client = yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
           Effect.provide(context),
         );
+        if (devShells === undefined) return client;
+        // One app-server serves threads in many directories; each new thread directory gets
+        // its nix dev shell, which the shells pick by directory.
+        const request: typeof client.request = (method, payload) => {
+          const cwd =
+            (method === "thread/start" || method === "thread/resume" || method === "thread/fork") &&
+            Predicate.hasProperty(payload, "cwd") &&
+            typeof payload.cwd === "string"
+              ? payload.cwd
+              : undefined;
+          return cwd === undefined
+            ? client.request(method, payload)
+            : devShells.prepare(cwd).pipe(Effect.andThen(client.request(method, payload)));
+        };
+        return CodexClient.CodexAppServerClient.of({ ...client, request });
       }),
     });
   }),

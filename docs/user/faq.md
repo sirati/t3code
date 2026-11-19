@@ -86,3 +86,7 @@ Yes, all three. Desktop app, CLI, the works. One catch: there is no `t3` binary 
 ## Why is my provider not showing up?
 
 Almost always, the CLI is not installed or not on the `PATH` of the machine that runs the server. (Not your phone. The computer.) Log in on that machine first, like `codex login` or `claude auth login`. Still missing? Point **Binary path** at it in provider settings. Version managers love to cause this one. [Provider setup](./install.md#providers)
+
+## Do agents get my project's nix dev shell?
+
+Yes, on macOS and Linux with `nix` on the server's `PATH`. When the project's main checkout has a `flake.nix`, T3 Code runs `nix develop` once for each directory a Claude or Codex session works in, worktrees included, and keeps the variables it sets. Their shells then load those variables before each command, so commands do not wait on nix. When the flake's `.nix` files or `flake.lock` change, T3 Code captures the dev shell again within about 30 seconds, and running sessions pick it up with their next command. If `nix develop` fails, agents keep the last working dev shell. Set `T3CODE_NIX_DEV_SHELL=0` on the server to turn this off.

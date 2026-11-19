@@ -1,3 +1,4 @@
+import { msg, useGT, useMessages } from "gt-react";
 import { useLayoutEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { useStore } from "zustand";
@@ -8,6 +9,7 @@ import { VoiceInputPill, VoiceWaveform } from "./chat/VoiceInputPill";
 import { Button } from "./ui/button";
 import { Tooltip, TooltipTrigger, TooltipPopup } from "./ui/tooltip";
 import { observeResize } from "../lib/observeResize";
+import { m, type MessageResolver } from "~/i18n/messages";
 import { Spinner } from "./ui/spinner";
 
 interface Field {
@@ -21,20 +23,21 @@ interface Field {
   dock: HTMLElement | null;
 }
 
-function dictationStatus(session: DictationSessionView) {
-  if (session.moving) return "Moving dictation here";
-  if (session.phase === "processing") return "Transcribing…";
-  if (session.phase === "delivering") return "Inserting…";
+function dictationStatus(session: DictationSessionView, resolve: MessageResolver) {
+  if (session.moving) return resolve(msg("Moving dictation here"));
+  if (session.phase === "processing") return resolve(msg("Transcribing…"));
+  if (session.phase === "delivering") return resolve(msg("Inserting…"));
   return session.levelSupported
-    ? "Recording"
-    : "Recording. This provider does not supply voice levels.";
+    ? resolve(msg("Recording"))
+    : resolve(msg("Recording. This provider does not supply voice levels."));
 }
 
 const keepFocus = (event: { preventDefault(): void }) => event.preventDefault();
 
 // The composer gets the capsule in-app voice input uses, with the broker's provider in place of a timer.
 function DockedDictation({ session, label }: { session: DictationSessionView; label: string }) {
-  const status = dictationStatus(session);
+  const gt = useGT();
+  const status = dictationStatus(session, useMessages());
   const recording = session.phase === "recording" && !session.moving;
   return (
     <VoiceInputPill>
@@ -45,7 +48,7 @@ function DockedDictation({ session, label }: { session: DictationSessionView; la
               type="button"
               size="icon-sm-pill"
               variant="ghost"
-              aria-label="Cancel dictation"
+              aria-label={gt("Cancel dictation")}
               onPointerDown={keepFocus}
               onClick={() => dictationState.getState().cancel?.(session.session)}
               className="pointer-events-auto shrink-0"
@@ -54,12 +57,12 @@ function DockedDictation({ session, label }: { session: DictationSessionView; la
         >
           <XIcon />
         </TooltipTrigger>
-        <TooltipPopup side="top">Cancel dictation</TooltipPopup>
+        <TooltipPopup side="top">{gt("Cancel dictation")}</TooltipPopup>
       </Tooltip>
       <div
         role="status"
         aria-live={recording ? "off" : "polite"}
-        aria-label={`${status}: ${label}`}
+        aria-label={gt("{status}: {field}", { status, field: label })}
         className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden pe-2.5"
       >
         {recording ? (
@@ -87,11 +90,12 @@ function DockedDictation({ session, label }: { session: DictationSessionView; la
 
 // A plain field only has room for the level, drawn like the in-app waveform.
 function InlineDictation({ session, label }: { session: DictationSessionView; label: string }) {
-  const status = dictationStatus(session);
+  const gt = useGT();
+  const status = dictationStatus(session, useMessages());
   return (
     <span
       role="status"
-      aria-label={`${status}: ${label}`}
+      aria-label={gt("{status}: {field}", { status, field: label })}
       className="flex h-6 w-10 items-center justify-center overflow-hidden rounded-md bg-muted/48 px-1 ring-1 ring-border ring-inset"
     >
       {session.phase === "recording" && !session.moving ? (
@@ -109,6 +113,7 @@ export function DictationIndicators() {
 }
 
 function ActiveDictationIndicators({ sessions }: { sessions: readonly DictationSessionView[] }) {
+  const gt = useGT();
   const [fields, setFields] = useState<readonly Field[]>([]);
   const count = sessions.length;
   // Loudness updates must not rebuild observers or temporarily change input padding.
@@ -205,7 +210,7 @@ function ActiveDictationIndicators({ sessions }: { sessions: readonly DictationS
             element.getAttribute("aria-label") ??
             labels?.[0]?.textContent?.trim() ??
             element.getAttribute("placeholder") ??
-            "text field",
+            m(msg("text field")),
           left,
           top,
           width: right - left,
@@ -332,7 +337,14 @@ function ActiveDictationIndicators({ sessions }: { sessions: readonly DictationS
                 <Button
                   variant="ghost-muted"
                   size="icon-xs"
-                  aria-label={`Move dictation here: ${field.label}${count > 1 ? ` (${session.provider})` : ""}`}
+                  aria-label={
+                    count > 1
+                      ? gt("Move dictation here: {field} ({provider})", {
+                          field: field.label,
+                          provider: session.provider,
+                        })
+                      : gt("Move dictation here: {field}", { field: field.label })
+                  }
                   onMouseDown={(event) => event.preventDefault()}
                   onClick={() => {
                     void dictationState.getState().move?.(session.session, field.element);
@@ -344,7 +356,7 @@ function ActiveDictationIndicators({ sessions }: { sessions: readonly DictationS
                   </span>
                 </Button>
               </TooltipTrigger>
-              <TooltipPopup>Move ongoing dictation here</TooltipPopup>
+              <TooltipPopup>{gt("Move ongoing dictation here")}</TooltipPopup>
             </Tooltip>
           ) : null,
         )}

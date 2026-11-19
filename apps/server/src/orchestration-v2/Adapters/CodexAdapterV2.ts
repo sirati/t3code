@@ -108,6 +108,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import { resolveAttachmentPath, resolveAttachmentPathById } from "../../attachmentStore.ts";
 import * as PortScanner from "../../preview/PortScanner.ts";
+import { AGENT_SHELL_HISTORY_ENVIRONMENT } from "../../provider/agentShellHistory.ts";
 import { getCodexServiceTierOptionValue } from "../../codexModelOptions.ts";
 import { ServerConfig } from "../../config.ts";
 import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
@@ -1506,6 +1507,15 @@ const CODEX_T3_MCP_TOOL_TIMEOUT_SEC = 65 * 60;
 const CODEX_T3_DIRECT_MCP_SERVER = "t3-code-direct";
 const CODEX_DIRECT_ONLY_T3_TOOLS = ["t3_thread_wait", "delegate_task"];
 
+/** Per-thread shell variables, which reach every shell Codex starts for the thread. */
+const codexShellEnvironmentConfig = (environment: Readonly<Record<string, string>>) =>
+  Object.fromEntries(
+    Object.entries(environment).map(([name, value]) => [
+      `shell_environment_policy.set.${name}`,
+      value,
+    ]),
+  );
+
 function codexThreadRuntimeParams(input: {
   readonly threadId: ThreadId | null;
   readonly mcpSession: McpProviderSession.McpProviderSessionConfig | undefined;
@@ -1534,6 +1544,7 @@ function codexThreadRuntimeParams(input: {
       ...(input.threadId === null
         ? {}
         : { [`shell_environment_policy.set.${PortScanner.AGENT_THREAD_ENV}`]: input.threadId }),
+      ...codexShellEnvironmentConfig(AGENT_SHELL_HISTORY_ENVIRONMENT),
       ...(t3Server === undefined
         ? {}
         : {

@@ -17,6 +17,9 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
+import * as TestClock from "effect/testing/TestClock";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
@@ -52,11 +55,12 @@ const modelSelection = {
 } as const;
 
 it.layer(layerProjectionStoreTest)("CheckpointCaptureServiceV2", (it) => {
-  it.effect.each([false, true])(
-    "captures without decoding history or losing newer delegated completion, ref lookup fails=%s",
-    (refLookupFails) =>
+  it.effect.each(["healthy", "ref-failure", "capture-timeout"] as const)(
+    "captures without decoding history or losing newer delegated completion, %s",
+    (scenario) =>
       Effect.gen(function* () {
         const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+        const captureStarted = yield* Deferred.make<void>();
         const now = yield* DateTime.now;
         const later = DateTime.add(now, { seconds: 1 });
 
@@ -269,7 +273,7 @@ it.layer(layerProjectionStoreTest)("CheckpointCaptureServiceV2", (it) => {
           Layer.provide(
             Layer.mergeAll(
               IdAllocator.layer,
-              refLookupFails
+              scenario !== "healthy"
                 ? CheckpointService.layer.pipe(
                     Layer.provide(
                       Layer.mergeAll(
@@ -278,16 +282,23 @@ it.layer(layerProjectionStoreTest)("CheckpointCaptureServiceV2", (it) => {
                         Layer.mock(CheckpointStore.CheckpointStore)({
                           listAuthoredPaths: () => Effect.succeed(null),
                           isGitRepository: () => Effect.succeed(true),
-                          captureCheckpoint: () => Effect.void,
+                          captureCheckpoint: () =>
+                            scenario === "capture-timeout"
+                              ? Deferred.succeed(captureStarted, undefined).pipe(
+                                  Effect.andThen(Effect.never),
+                                )
+                              : Effect.void,
                           hasCheckpointRef: () =>
-                            Effect.fail(
-                              new VcsProcessTimeoutError({
-                                operation: "test.hasCheckpointRef",
-                                command: "git",
-                                cwd: "/repo",
-                                timeoutMs: 30000,
-                              }),
-                            ),
+                            scenario === "capture-timeout"
+                              ? Effect.succeed(false)
+                              : Effect.fail(
+                                  new VcsProcessTimeoutError({
+                                    operation: "test.hasCheckpointRef",
+                                    command: "git",
+                                    cwd: "/repo",
+                                    timeoutMs: 30000,
+                                  }),
+                                ),
                         }),
                       ),
                     ),
@@ -321,7 +332,15 @@ it.layer(layerProjectionStoreTest)("CheckpointCaptureServiceV2", (it) => {
             .execute({ threadId, runId, scopeId: CheckpointScopeId.make("missing-scope") })
             .pipe(Effect.flip);
           assert.instanceOf(incomplete, CheckpointCaptureService.CheckpointCaptureExecutionError);
-          yield* service.execute({ threadId, runId, scopeId });
+          const fiber = yield* service
+            .execute({ threadId, runId, scopeId })
+            .pipe(Effect.forkScoped);
+          if (scenario === "capture-timeout") {
+            yield* Deferred.await(captureStarted);
+            yield* TestClock.adjust("30 seconds");
+            assert.isDefined(fiber.pollUnsafe(), "checkpoint timeout left the run waiting");
+          }
+          yield* Fiber.join(fiber);
 
           const events = yield* Ref.get(committed);
           const runUpdated = events.find((event) => event.type === "run.updated");
@@ -333,10 +352,13 @@ it.layer(layerProjectionStoreTest)("CheckpointCaptureServiceV2", (it) => {
           const capturedEvent = events.find((event) => event.type === "checkpoint.captured");
           assert.equal(
             runUpdated.payload.checkpointId,
-            refLookupFails ? capturedEvent?.payload.id : captured.id,
+            scenario !== "healthy" ? capturedEvent?.payload.id : captured.id,
           );
-          if (refLookupFails && capturedEvent?.type === "checkpoint.captured") {
-            assert.equal(capturedEvent.payload.status, "ready");
+          if (scenario !== "healthy" && capturedEvent?.type === "checkpoint.captured") {
+            assert.equal(
+              capturedEvent.payload.status,
+              scenario === "capture-timeout" ? "error" : "ready",
+            );
             assert.deepEqual(capturedEvent.payload.files, []);
           }
           assert.isUndefined(
@@ -373,7 +395,7 @@ it.layer(layerProjectionStoreTest)("CheckpointCaptureServiceV2", (it) => {
           yield* Ref.set(committed, []);
           yield* service.execute({ threadId, runId, scopeId });
           assert.deepEqual(yield* Ref.get(committed), []);
-        }).pipe(Effect.provide(layerCapture));
+        }).pipe(Effect.scoped, Effect.provide(layerCapture));
       }),
   );
 

@@ -3,7 +3,9 @@ import {
   DictationSessionTargets,
   DICTATION_SESSION_TIMEOUT_ERROR,
 } from "@t3tools/shared/dictationSessionTargets";
+import { msg } from "gt-react";
 import { toastManager } from "../components/ui/toast";
+import { m } from "~/i18n/messages";
 import { dictationState, type DictationSessionView } from "./dictationState";
 
 export interface DictationTarget {
@@ -154,7 +156,7 @@ export function startDictationTargets() {
     console.error(error, { session });
     toastManager.add({
       type: "error",
-      title: "Dictation timed out",
+      title: m(msg("Dictation timed out")),
       description: error,
       timeout: 0,
     });
@@ -222,8 +224,10 @@ export function startDictationTargets() {
       console.error("Could not move dictation", { session, error });
       toastManager.add({
         type: "error",
-        title: "Could not move dictation",
-        description: "The session may already be finishing. Try again while dictation is active.",
+        title: m(msg("Could not move dictation")),
+        description: m(
+          msg("The session may already be finishing. Try again while dictation is active."),
+        ),
       });
       return false;
     }
@@ -247,8 +251,8 @@ export function startDictationTargets() {
       console.error("Could not cancel dictation", { session, error });
       toastManager.add({
         type: "error",
-        title: "Could not cancel dictation",
-        description: "The session may already be finishing.",
+        title: m(msg("Could not cancel dictation")),
+        description: m(msg("The session may already be finishing.")),
       });
     });
   };

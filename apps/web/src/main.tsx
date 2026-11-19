@@ -9,13 +9,23 @@ import { isElectron } from "./env";
 import { startAppServices } from "./appInit";
 import { AppRoot } from "./AppRoot";
 import { whenLocaleReady } from "./i18n/runtime";
-import { startDictationTargets } from "./lib/dictationTargets";
-import { DictationIndicators } from "./components/DictationIndicators";
 import { reloadOnceForChunkLoadError } from "./lib/chunkReloadGuard";
 
 const router = startAppServices();
-const stopDictationTargets = startDictationTargets();
-import.meta.hot?.dispose(stopDictationTargets);
+// Broker dictation exists only in the desktop app, so browsers never load its modules.
+const dictationAvailable = window.desktopBridge?.dictation !== undefined;
+const DictationIndicators = dictationAvailable
+  ? React.lazy(() =>
+      import("./components/DictationIndicators").then((module) => ({
+        default: module.DictationIndicators,
+      })),
+    )
+  : null;
+if (dictationAvailable) {
+  void import("./lib/dictationTargets").then(({ startDictationTargets }) => {
+    import.meta.hot?.dispose(startDictationTargets());
+  });
+}
 
 const clerkPublishableKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY as string | undefined;
 
@@ -30,7 +40,11 @@ window.addEventListener("vite:preloadError", (event) => {
 const app = (
   <>
     <AppRoot router={router} />
-    <DictationIndicators />
+    {DictationIndicators ? (
+      <React.Suspense fallback={null}>
+        <DictationIndicators />
+      </React.Suspense>
+    ) : null}
   </>
 );
 

@@ -67,6 +67,7 @@
           t3code-electron = prev.callPackage ./nix/electron.nix { };
           t3code-dictation-addon = dictation-api.packages.${prev.stdenv.hostPlatform.system}.node-addon;
           t3code-resource-monitor = final.callPackage ./nix/resource-monitor.nix { inherit src; };
+          t3code-session-keeper = final.callPackage ./nix/session-keeper.nix { inherit src; };
           t3code = final.callPackage ./nix/package.nix { inherit src; };
         };
 
@@ -79,6 +80,7 @@
           default = pkgs.t3code;
           t3code = pkgs.t3code;
           resource-monitor = pkgs.t3code-resource-monitor;
+          session-keeper = pkgs.t3code-session-keeper;
         }
       );
 
@@ -116,7 +118,7 @@
           pkgs = pkgsFor system;
         in
         {
-          inherit (self.packages.${system}) t3code resource-monitor;
+          inherit (self.packages.${system}) t3code resource-monitor session-keeper;
         }
         // nixpkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           modules = import ./nix/module-check.nix { inherit self nixpkgs pkgs; };

@@ -86,3 +86,7 @@ Yes, all three. Desktop app, CLI, the works. One catch: there is no `t3` binary 
 ## Why is my provider not showing up?
 
 Almost always, the CLI is not installed or not on the `PATH` of the machine that runs the server. (Not your phone. The computer.) Log in on that machine first, like `codex login` or `claude auth login`. Still missing? Point **Binary path** at it in provider settings. Version managers love to cause this one. [Provider setup](./install.md#providers)
+
+## Do agent commands end up in my shell history?
+
+No. Claude and Codex run their commands in shells that skip your `~/.bashrc`, and Codex's shells are interactive, so bash would save their commands to `~/.bash_history` on exit and cut the file to its default 500 lines. T3 Code starts both with an empty `HISTFILE`, which every shell they open inherits, so bash saves nothing. Running `codex` or `claude` yourself outside T3 Code does not get this.

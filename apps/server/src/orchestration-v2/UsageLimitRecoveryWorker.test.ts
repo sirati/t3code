@@ -87,6 +87,9 @@ it.effect.each([
           yield* Deferred.succeed(outcome, ending.endsWith("available") ? "available" : "expired");
           yield* Deferred.await(released);
           if (ending.endsWith("available")) {
+            // The next sweep resumes it, with the thread as it is by then.
+            yield* Effect.yieldNow;
+            yield* sweep();
             const command = yield* Deferred.await(dispatched);
             if (command.type !== "message.dispatch") return assert.fail("Expected a continuation");
             assert.equal(command.threadId, candidate.id);
@@ -137,6 +140,147 @@ it.effect.each([
         ),
       );
     }).pipe(Effect.scoped),
+);
+
+const proxyCandidate = (
+  name: string,
+  now: DateTime.Utc,
+  extra: Partial<ProjectionStore.ProjectionLimitRecoveryCandidate> = {},
+): ProjectionStore.ProjectionLimitRecoveryCandidate => ({
+  id: ThreadId.make(`recover:${name}`),
+  status: "failed",
+  lastErrorClass: "usage_limit",
+  latestRunId: RunId.make(`recover:${name}:run`),
+  usageLimitResetAt: null,
+  proxyRecoveryId: `ticket${name}`.padEnd(16, "x"),
+  latestRunCompletedAt: now,
+  updatedAt: now,
+  archivedAt: null,
+  settledOverride: null,
+  pendingRuntimeRequest: null,
+  snoozedUntil: null,
+  limitRecovery: {
+    runId: RunId.make(`recover:${name}:run`),
+    resetAt: null,
+    proxyRecoveryId: `ticket${name}`.padEnd(16, "x"),
+    autoResume: true,
+    requestId: CommandId.make(`recover:${name}:request`),
+  },
+  ...extra,
+});
+
+const proxyWorkerLayer = (input: {
+  readonly candidates: Ref.Ref<ReadonlyArray<ProjectionStore.ProjectionLimitRecoveryCandidate>>;
+  readonly resumed: Array<string>;
+  readonly recovery: Partial<CliproxyRecovery.CliproxyRecovery["Service"]>;
+}) =>
+  Layer.mergeAll(
+    Layer.mock(ProjectionStore.ProjectionStoreV2)({
+      getLimitRecoveryCandidates: () => Ref.get(input.candidates),
+      getLimitRecoveryWakeAt: () => Effect.succeed(null),
+    }),
+    Layer.mock(Orchestrator.OrchestratorV2)({
+      autoArmLimitRecovery: () => Effect.die("already armed"),
+      streamDomainEvents: Stream.never,
+    }),
+    Layer.mock(ThreadManagement.ThreadManagementService)({
+      // A resumed thread is running, so it stops being a candidate.
+      dispatch: (command) =>
+        Effect.gen(function* () {
+          if (command.type !== "message.dispatch") return yield* Effect.die("expected a resume");
+          input.resumed.push(command.threadId);
+          yield* Ref.update(input.candidates, (all) =>
+            all.filter((t) => t.id !== command.threadId),
+          );
+          return { sequence: 1, storedEvents: [] };
+        }),
+    }),
+    Layer.mock(CliproxyRecovery.CliproxyRecovery)(input.recovery),
+    ServerSettings.layerTest({
+      usageLimitSources: {
+        [UsageLimitSourceId.make("hub")]: {
+          kind: "cliproxy",
+          url: "https://hub.test",
+          managementKey: "key",
+          enabled: true,
+        },
+      },
+    }),
+  );
+
+it.effect("resumes every thread a freed route unblocks, one every ten seconds", () =>
+  Effect.gen(function* () {
+    const now = yield* DateTime.now;
+    const candidates = yield* Ref.make<
+      ReadonlyArray<ProjectionStore.ProjectionLimitRecoveryCandidate>
+    >(["a", "b", "c"].map((name) => proxyCandidate(name, now)));
+    const resumed: Array<string> = [];
+    yield* Effect.gen(function* () {
+      const sweep = yield* makeSweep;
+      yield* sweep();
+      yield* Effect.yieldNow;
+      yield* sweep();
+      assert.lengthOf(resumed, 1);
+      yield* TestClock.adjust("5 seconds");
+      yield* sweep();
+      assert.lengthOf(resumed, 1);
+      yield* TestClock.adjust("5 seconds");
+      yield* sweep();
+      assert.lengthOf(resumed, 2);
+      yield* TestClock.adjust("10 seconds");
+      yield* sweep();
+      assert.deepEqual(resumed, ["recover:a", "recover:b", "recover:c"]);
+    }).pipe(
+      Effect.provide(
+        proxyWorkerLayer({
+          candidates,
+          resumed,
+          recovery: { wait: () => Effect.succeed("available" as const) },
+        }),
+      ),
+    );
+  }).pipe(Effect.scoped),
+);
+
+it.effect("watches account cooldowns for a thread whose ticket the proxy forgot", () =>
+  Effect.gen(function* () {
+    const now = yield* DateTime.now;
+    const freed = yield* Deferred.make<void>();
+    const routes: Array<CliproxyRecovery.RecoveryRoute> = [];
+    const candidates = yield* Ref.make<
+      ReadonlyArray<ProjectionStore.ProjectionLimitRecoveryCandidate>
+    >([
+      proxyCandidate("lost", now, { providerInstanceId: "claudeAgent", model: "claude-opus-5-5" }),
+    ]);
+    const resumed: Array<string> = [];
+    yield* Effect.gen(function* () {
+      const sweep = yield* makeSweep;
+      yield* sweep();
+      yield* Effect.yieldNow;
+      yield* sweep();
+      assert.lengthOf(resumed, 0);
+      assert.deepEqual(routes, [{ provider: "claude", model: "claude-opus-5-5" }]);
+      yield* Deferred.succeed(freed, undefined);
+      yield* Effect.yieldNow;
+      yield* sweep();
+      assert.deepEqual(resumed, ["recover:lost"]);
+    }).pipe(
+      Effect.provide(
+        proxyWorkerLayer({
+          candidates,
+          resumed,
+          recovery: {
+            wait: () => Effect.succeed("expired" as const),
+            waitForRoute: (_sources, route) =>
+              Effect.sync(() => routes.push(route)).pipe(
+                Effect.andThen(Deferred.await(freed)),
+                Effect.as("available" as const),
+              ),
+          },
+        }),
+      ),
+    );
+  }).pipe(Effect.scoped),
 );
 
 it.effect("idle sweeps skip SQL until the next wake time or a relevant event", () =>

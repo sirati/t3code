@@ -22,6 +22,19 @@ import * as ThreadManagement from "./ThreadManagementService.ts";
 import { routineSpan } from "@t3tools/shared/observability";
 
 export const MAX_OVERDUE_ARM_MS = 24 * 60 * 60 * 1000;
+// One freed route can wake many threads; they resume one at a time so no burst exhausts it again.
+const PROXY_RESUME_SPACING_MS = 10_000;
+
+/** The proxy provider and model a thread's turn needs, for drivers the proxy serves. */
+function proxyRouteFor(
+  thread: ProjectionStore.ProjectionLimitRecoveryCandidate,
+  providerDrivers: Readonly<Record<string, string | undefined>>,
+): CliproxyRecovery.RecoveryRoute | undefined {
+  if (thread.providerInstanceId === undefined) return undefined;
+  const driver = providerDrivers[thread.providerInstanceId] ?? thread.providerInstanceId;
+  const provider = driver === "claudeAgent" ? "claude" : driver === "codex" ? "codex" : undefined;
+  return provider === undefined ? undefined : { provider, model: thread.model };
+}
 
 export function limitRecoveryCommand(
   thread: ProjectionStore.ProjectionLimitRecoveryCandidate,
@@ -126,14 +139,18 @@ export const makeSweep = Effect.gen(function* () {
   yield* forkParked(Stream.runForEach(settings.streamChanges, () => due.invalidate));
   const recovery = yield* CliproxyRecovery.CliproxyRecovery;
   const scope = yield* Scope.Scope;
+  // "fallback": the proxy forgot the ticket, so its account cooldowns are watched instead.
+  type WaitState = "waiting" | "fallback" | "available" | "expired";
   const waits = new Map<
     string,
     {
       sources: ReadonlyArray<readonly [string, UsageLimitSourceConfig]>;
-      state: "waiting" | "available" | "expired";
+      state: WaitState;
+      availableAt: number;
       fiber: Fiber.Fiber<void, CliproxyRecovery.CliproxyRecoveryError> | undefined;
     }
   >();
+  let lastProxyResumeAt = Number.NEGATIVE_INFINITY;
   const dispatch = Effect.fn("UsageLimitRecoveryWorker.dispatch")(
     function* (command: OrchestrationV2Command) {
       if (command.type === "thread.metadata.update" && command.limitRecovery != null) {
@@ -166,6 +183,18 @@ export const makeSweep = Effect.gen(function* () {
       .filter(([, source]) => source.enabled && source.managementKey)
       .sort(([a], [b]) => a.localeCompare(b));
     const active = new Set<string>();
+    let providerDrivers: Record<string, string | undefined> | undefined;
+    const driversOf = () =>
+      (providerDrivers ??= Object.fromEntries(
+        Object.entries(preferences.providerInstances).map(([id, instance]) => [
+          id,
+          instance.driver,
+        ]),
+      ));
+    const ready: Array<{
+      readonly thread: (typeof candidates)[number];
+      readonly availableAt: number;
+    }> = [];
     for (const thread of candidates) {
       const waitKey = `${thread.id}:${thread.latestRunId}:${thread.proxyRecoveryId}:${thread.limitRecovery?.requestId}`;
       let wait = waits.get(waitKey);
@@ -198,52 +227,69 @@ export const makeSweep = Effect.gen(function* () {
         if (!wait) {
           const entry = {
             sources,
-            state: "waiting" as "waiting" | "available" | "expired",
+            state: "waiting" as WaitState,
+            availableAt: Number.POSITIVE_INFINITY,
             fiber: undefined as
               | Fiber.Fiber<void, CliproxyRecovery.CliproxyRecoveryError>
               | undefined,
           };
           waits.set(waitKey, entry);
-          const id = thread.proxyRecoveryId;
-          entry.fiber = yield* recovery
-            .wait(
-              sources.map(([, config]) => config),
-              id,
-            )
-            .pipe(
-              Effect.tap((state) =>
-                Effect.gen(function* () {
-                  entry.state = state;
-                  yield* due.invalidate;
-                  if (state !== "available") return;
-                  const currentTime = yield* DateTime.now;
-                  const command = limitRecoveryCommand(
-                    thread,
-                    preferences.autoResumeLimitedThreads,
-                    DateTime.toEpochMillis(currentTime),
-                    preferences.snoozeLimitedThreads,
-                    true,
-                  );
-                  if (command !== null) yield* dispatch(command);
-                }),
-              ),
-              Effect.asVoid,
-              Effect.forkIn(scope),
-            );
+          const configs = sources.map(([, config]) => config);
+          const route = proxyRouteFor(thread, driversOf());
+          const settle = Effect.fn("UsageLimitRecoveryWorker.settleWait")(function* (
+            state: WaitState,
+          ) {
+            entry.state = state;
+            if (state === "available")
+              entry.availableAt = DateTime.toEpochMillis(yield* DateTime.now);
+            yield* due.invalidate;
+          });
+          entry.fiber = yield* recovery.wait(configs, thread.proxyRecoveryId).pipe(
+            Effect.flatMap((state) =>
+              state === "expired" && route !== undefined
+                ? settle("fallback").pipe(
+                    Effect.andThen(recovery.waitForRoute(configs, route)),
+                    Effect.flatMap(settle),
+                  )
+                : settle(state),
+            ),
+            Effect.forkIn(scope),
+          );
           wait = entry;
         }
       }
       if (waitingForProxy && wait?.state === "waiting") continue;
+      // The sweep resumes these below, spaced out, with the thread as it is now.
+      if (waitingForProxy && wait?.state === "available") {
+        ready.push({ thread, availableAt: wait.availableAt });
+        continue;
+      }
       const command = limitRecoveryCommand(
         thread,
         preferences.autoResumeLimitedThreads,
         nowMs,
         preferences.snoozeLimitedThreads,
-        wait?.state === "available",
       );
       if (command === null) continue;
       acted = true;
       yield* dispatch(command);
+    }
+    if (nowMs - lastProxyResumeAt >= PROXY_RESUME_SPACING_MS) {
+      ready.sort((a, b) => a.availableAt - b.availableAt);
+      for (const { thread } of ready) {
+        const command = limitRecoveryCommand(
+          thread,
+          preferences.autoResumeLimitedThreads,
+          nowMs,
+          preferences.snoozeLimitedThreads,
+          true,
+        );
+        if (command === null) continue;
+        acted = true;
+        lastProxyResumeAt = nowMs;
+        yield* dispatch(command);
+        break;
+      }
     }
     for (const [key, wait] of waits) {
       if (active.has(key)) continue;

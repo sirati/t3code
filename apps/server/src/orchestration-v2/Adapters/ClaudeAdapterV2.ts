@@ -196,6 +196,7 @@ import {
 import * as ServerConfig from "../../config.ts";
 import { NativeTelemetryClient } from "../../resourceTelemetry/NativeTelemetryClient.ts";
 import * as PortScanner from "../../preview/PortScanner.ts";
+import { DevShellEnvironment } from "../../provider/DevShellEnvironment.ts";
 import * as ProcessRunner from "../../processRunner.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
@@ -1667,6 +1668,7 @@ export const layerQueryRunner: Layer.Layer<
     const runFork = Effect.runForkWith(yield* Effect.context<never>());
     const hostEnvironment = yield* HostProcess.Environment;
     const portDiscovery = yield* PortScanner.PortDiscovery;
+    const devShells = Option.getOrUndefined(yield* Effect.serviceOption(DevShellEnvironment));
     const processRunner = yield* ProcessRunner.make();
     const psProcessTable = processRunner
       .run({
@@ -1780,10 +1782,15 @@ export const layerQueryRunner: Layer.Layer<
         endsOnFailedRequest = claudeHistoryEndsOnFailedRequest(history);
         resumeSessionAt = claudeResumeSessionAt(history) ?? resumeSessionAt;
       }
+      // The CLI's Bash commands load the project's nix dev shell, also in a distant worktree.
+      if (devShells !== undefined && sdkOptions.cwd !== undefined) {
+        yield* devShells.prepare(sdkOptions.cwd);
+      }
       const queryOptions = {
         ...sdkOptions,
         ...(resumeSessionAt === undefined ? {} : { resumeSessionAt }),
         env: {
+          ...devShells?.claudeEnvironment,
           ...(sdkOptions.env ?? hostEnvironment),
           // The CLI would re-run a failed request by itself, then run the resume prompt as a second turn.
           ...(input.resume && !endsOnFailedRequest

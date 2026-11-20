@@ -189,6 +189,7 @@ import {
 import * as ServerConfig from "../../config.ts";
 import * as PortScanner from "../../preview/PortScanner.ts";
 import { AGENT_SHELL_HISTORY_ENVIRONMENT } from "../../provider/agentShellHistory.ts";
+import { DevShellEnvironment } from "../../provider/DevShellEnvironment.ts";
 import * as ProcessRunner from "../../processRunner.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
@@ -1469,6 +1470,7 @@ export const layerQueryRunner: Layer.Layer<
     const runFork = Effect.runForkWith(yield* Effect.context<never>());
     const hostEnvironment = yield* HostProcess.Environment;
     const portDiscovery = yield* PortScanner.PortDiscovery;
+    const devShells = Option.getOrUndefined(yield* Effect.serviceOption(DevShellEnvironment));
     const processRunner = yield* ProcessRunner.make();
     const readProcessTable = processRunner
       .run({ command: "ps", args: ["-A", "-o", "pid=,ppid=,pgid=,lstart="], timeout: "5 seconds" })
@@ -1530,10 +1532,15 @@ export const layerQueryRunner: Layer.Layer<
             : messages.findIndex((message) => message.uuid === resumeSessionAt) + 1;
         resumeSessionAt = claudeResumeSessionAt(messages.slice(0, boundary)) ?? resumeSessionAt;
       }
+      // The CLI's Bash commands load the project's nix dev shell, also in a distant worktree.
+      if (devShells !== undefined && sdkOptions.cwd !== undefined) {
+        yield* devShells.prepare(sdkOptions.cwd);
+      }
       const queryOptions = {
         ...sdkOptions,
         ...(resumeSessionAt === undefined ? {} : { resumeSessionAt }),
         env: {
+          ...devShells?.claudeEnvironment,
           ...(sdkOptions.env ?? hostEnvironment),
           ...(input.resume
             ? {

@@ -1,9 +1,9 @@
 // @effect-diagnostics nodeBuiltinImport:off - The captured dev shells are files that agent shells source.
 /**
- * A project whose main checkout has a nix flake gets its dev shell in every agent shell, also in
- * worktrees outside the project directory. `nix develop` runs once per working directory and again
- * when the flake changes. Agent shells only source the captured variables before each command, so
- * a command never waits on nix, and a running session picks up a changed flake with its next command.
+ * Agent shells get the dev shell of their project's main-checkout flake, also in distant worktrees.
+ * `nix develop` runs per working directory and again when the flake changes; shells source the
+ * captured variables before each command. A new directory starts from a sibling's capture, and a
+ * command waits on nix only while its directory has none, so none runs without the dev shell.
  */
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
@@ -21,8 +21,8 @@ import * as ProcessRunner from "../processRunner.ts";
 /** Set to "0" to start agents without their project's dev shell. */
 export const DEV_SHELL_DISABLE_ENV = "T3CODE_NIX_DEV_SHELL";
 const POLL_INTERVAL = "30 seconds";
-// A first `nix develop` can build for minutes; a session starts after this and catches up later.
-const FIRST_SHELL_WAIT = "15 seconds";
+// Half-second steps a command waits for its directory's first capture: five minutes.
+const FIRST_SHELL_WAIT_STEPS = 600;
 const NIX_DEVELOP_TIMEOUT = "10 minutes";
 const MAX_SCAN_DEPTH = 3;
 
@@ -110,9 +110,13 @@ export function devShellScript(input: {
   ].join("\n");
 }
 
-/** Picks the dev shell of the directory a command runs in; most specific directory first. */
+/**
+ * Picks the dev shell of the directory a command runs in; most specific directory first. While the
+ * `loading` file of a directory without a dev shell exists, its first capture is running, and the
+ * command waits for it.
+ */
 export function dispatcherScript(
-  entries: ReadonlyArray<{ readonly cwd: string; readonly file: string }>,
+  entries: ReadonlyArray<{ readonly cwd: string; readonly file: string; readonly loading: string }>,
 ): string {
   const sorted = [...entries].sort((a, b) => b.cwd.length - a.cwd.length);
   return [
@@ -120,10 +124,20 @@ export function dispatcherScript(
     `if [ -n "\${BASH_VERSION-}" ]; then`,
     `  case "$PWD/" in`,
     ...sorted.map(
-      ({ cwd, file }) =>
-        `    ${quote(cwd.endsWith("/") ? cwd : `${cwd}/`)}*) [ ! -r ${quote(file)} ] || . ${quote(file)} ;;`,
+      ({ cwd, file, loading }) =>
+        `    ${quote(cwd.endsWith("/") ? cwd : `${cwd}/`)}*) __t3_file=${quote(file)} __t3_loading=${quote(loading)} ;;`,
     ),
+    `    *) __t3_file= ;;`,
     `  esac`,
+    `  if [ -n "$__t3_file" ]; then`,
+    `    __t3_wait=0`,
+    `    while [ ! -r "$__t3_file" ] && [ -e "$__t3_loading" ] && [ "$__t3_wait" -lt ${FIRST_SHELL_WAIT_STEPS} ]; do`,
+    `      sleep 0.5 2>/dev/null || break`,
+    `      __t3_wait=$((__t3_wait + 1))`,
+    `    done`,
+    `    [ ! -r "$__t3_file" ] || . "$__t3_file"`,
+    `  fi`,
+    `  unset __t3_file __t3_loading __t3_wait`,
     `fi`,
     "",
   ].join("\n");
@@ -133,6 +147,22 @@ const writeAtomic = (path: string, content: string) => {
   const pending = `${path}.${NodeCrypto.randomUUID()}.pending`;
   NodeFS.writeFileSync(pending, content, { mode: 0o600 });
   NodeFS.renameSync(pending, path);
+};
+// Best effort: without these files commands only stop waiting for, or start from, a capture.
+const touch = (path: string) => {
+  try {
+    NodeFS.writeFileSync(path, "", { mode: 0o600 });
+  } catch {}
+};
+const remove = (path: string) => {
+  try {
+    NodeFS.rmSync(path, { force: true });
+  } catch {}
+};
+const copy = (from: string, to: string) => {
+  try {
+    writeAtomic(to, NodeFS.readFileSync(from, "utf8"));
+  } catch {}
 };
 
 // Only the flake's own nix files decide its dev shell; a scan skips checkouts and build output.
@@ -167,6 +197,7 @@ interface Entry {
   readonly flake: string;
   readonly cwd: string;
   readonly file: string;
+  readonly loading: string;
   fingerprint: string | undefined;
   running: Promise<void> | undefined;
 }
@@ -208,7 +239,10 @@ export class DevShellEnvironment extends Context.Service<
     readonly environment: Readonly<Record<string, string>>;
     /** The same for Claude Code, which re-exports its own PATH after the shell's startup files. */
     readonly claudeEnvironment: Readonly<Record<string, string>>;
-    /** Tracks the dev shell of `cwd`, waiting briefly for a first capture. Never fails. */
+    /**
+     * Tracks the dev shell of `cwd` without waiting for nix; commands wait for a first capture
+     * themselves. Never fails.
+     */
     readonly prepare: (cwd: string) => Effect.Effect<void>;
   }
 >()("t3/provider/DevShellEnvironment") {}
@@ -242,7 +276,9 @@ const make = Effect.gen(function* () {
   const writeDispatcher = () =>
     writeAtomic(
       dispatcher,
-      dispatcherScript([...entries.values()].map(({ cwd, file }) => ({ cwd, file }))),
+      dispatcherScript(
+        [...entries.values()].map(({ cwd, file, loading }) => ({ cwd, file, loading })),
+      ),
     );
   const entryFor = (flake: string, cwd: string): Entry => {
     const key = hash(`${flake}\0${cwd}`);
@@ -253,11 +289,21 @@ const make = Effect.gen(function* () {
       flake,
       cwd,
       file: NodePath.join(directory, `${key}.sh`),
+      loading: NodePath.join(directory, `${key}.loading`),
       fingerprint: undefined,
       running: undefined,
     };
     const stored = readStoredEntry(metadataPath(entry));
     if (stored?.flake === flake && stored.cwd === cwd) entry.fingerprint = stored.fingerprint;
+    // A new worktree starts with the dev shell of another directory of the same flake, preferably
+    // the main checkout's, until its own capture replaces it.
+    if (!NodeFS.existsSync(entry.file)) {
+      const siblings = [...entries.values()].filter((other) => other.flake === flake);
+      const source = [...siblings.filter((other) => other.cwd === flake), ...siblings].find(
+        (other) => NodeFS.existsSync(other.file),
+      );
+      if (source !== undefined) copy(source.file, entry.file);
+    }
     entries.set(key, entry);
     writeDispatcher();
     return entry;
@@ -323,7 +369,11 @@ const make = Effect.gen(function* () {
     });
   });
   const refresh = (entry: Entry) => {
-    entry.running ??= runPromise(
+    if (entry.running !== undefined) return entry.running;
+    // Commands in a directory without a dev shell wait for this capture instead of running bare.
+    const first = !NodeFS.existsSync(entry.file);
+    if (first) touch(entry.loading);
+    entry.running = runPromise(
       capture(entry).pipe(
         Effect.catchCause((cause) =>
           Effect.logWarning("Could not check the nix dev shell", { cwd: entry.cwd, cause }),
@@ -331,6 +381,7 @@ const make = Effect.gen(function* () {
       ),
     ).finally(() => {
       entry.running = undefined;
+      if (first) remove(entry.loading);
     });
     return entry.running;
   };
@@ -365,8 +416,8 @@ const make = Effect.gen(function* () {
     function* (cwd: string) {
       const flake = yield* flakeFor(cwd);
       if (flake === undefined) return;
-      const pending = refresh(entryFor(flake, cwd));
-      yield* Effect.promise(() => pending).pipe(Effect.timeoutOption(FIRST_SHELL_WAIT));
+      // The session starts now; its first command waits if the directory has no dev shell yet.
+      void refresh(entryFor(flake, cwd));
     },
     (effect, cwd) =>
       effect.pipe(
@@ -376,8 +427,10 @@ const make = Effect.gen(function* () {
       ),
   );
 
-  // Sessions kept across a restart still source these files; keep checking them.
+  // Sessions kept across a restart still source these files; keep checking them. Loading markers
+  // are from captures of an earlier server, which no longer run.
   for (const name of NodeFS.readdirSync(directory)) {
+    if (name.endsWith(".loading")) remove(NodePath.join(directory, name));
     if (!name.endsWith(".json")) continue;
     const stored = readStoredEntry(NodePath.join(directory, name));
     if (stored !== undefined && NodeFS.existsSync(stored.cwd)) entryFor(stored.flake, stored.cwd);

@@ -35,6 +35,24 @@ const bash = (script: string, env: NodeJS.ProcessEnv, cwd?: string) =>
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   });
+// For a shell that waits on the server, which needs the event loop meanwhile.
+const bashAsync = (script: string, env: NodeJS.ProcessEnv, cwd: string) =>
+  Effect.promise(
+    () =>
+      new Promise<string>((resolve) => {
+        const child = NodeChildProcess.spawn(BASH, ["-c", script], {
+          env,
+          cwd,
+          stdio: ["ignore", "pipe", "ignore"],
+          timeout: 30_000,
+        });
+        let output = "";
+        child.stdout.setEncoding("utf8").on("data", (chunk: string) => {
+          output += chunk;
+        });
+        child.on("close", () => resolve(output));
+      }),
+  );
 
 describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("dev shell scripts", () => {
   it("applies a captured dev shell repeatably and replaces an older one", () => {
@@ -97,12 +115,17 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("dev shell scri
       const nested = NodePath.join(project, "nested");
       NodeFS.mkdirSync(nested, { recursive: true });
       const dispatcher = NodePath.join(dir, "dispatcher.sh");
+      const loading = NodePath.join(dir, "nothing.loading");
       NodeFS.writeFileSync(
         dispatcher,
         dispatcherScript([
-          { cwd: project, file: file("project") },
-          { cwd: nested, file: file("nested") },
-          { cwd: NodePath.join(dir, "missing"), file: NodePath.join(dir, "missing.sh") },
+          { cwd: project, file: file("project"), loading },
+          { cwd: nested, file: file("nested"), loading },
+          {
+            cwd: NodePath.join(dir, "missing"),
+            file: NodePath.join(dir, "missing.sh"),
+            loading,
+          },
         ]),
       );
       const picked = (cwd: string) =>
@@ -114,10 +137,35 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("dev shell scri
       NodeFS.rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("waits for a first capture that is still running", () => {
+    const dir = tempDir();
+    try {
+      const file = NodePath.join(dir, "late.sh");
+      const loading = NodePath.join(dir, "late.loading");
+      const dispatcher = NodePath.join(dir, "dispatcher.sh");
+      NodeFS.writeFileSync(dispatcher, dispatcherScript([{ cwd: dir, file, loading }]));
+      const env = { PATH: process.env.PATH ?? "/usr/bin:/bin" };
+      const run = (capture: string) => {
+        NodeFS.writeFileSync(loading, "");
+        return bash(
+          `(sleep 1; ${capture} rm '${loading}') & . ${dispatcher}; printf '%s' "\${PICKED-none}"`,
+          env,
+          dir,
+        );
+      };
+      // A failed capture ends the wait without a dev shell.
+      assert.equal(run(""), "none");
+      assert.equal(run(`printf 'export PICKED=late\\n' > '${file}';`), "late");
+    } finally {
+      NodeFS.rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("DevShellEnvironment", () => {
-  // A stand-in nix whose dev shell exports what the flake directory's `value` file says.
+  // A stand-in nix whose dev shell exports what the flake directory's `value` file says and where
+  // it ran. It holds a capture back while the flake directory has a `hold` file.
   const fakeNix = (dir: string) => {
     const bin = NodePath.join(dir, "fake-bin");
     NodeFS.mkdirSync(bin);
@@ -127,7 +175,8 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("DevShellEnviro
         "#!/bin/sh",
         'if [ "$1" = --version ]; then echo "nix (fake) 2.0"; exit 0; fi',
         "flake=$2; shift 3",
-        'FROM_FLAKE=$(cat "$flake/value"); export FROM_FLAKE',
+        'while [ -e "$flake/hold" ]; do sleep 0.1; done',
+        'FROM_FLAKE=$(cat "$flake/value"); CAPTURED_IN=$(pwd); export FROM_FLAKE CAPTURED_IN',
         'PATH="$flake/tools:$PATH"; export PATH',
         'exec "$@"',
         "",
@@ -137,10 +186,11 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("DevShellEnviro
     return bin;
   };
 
-  it.effect("gives a worktree its main checkout's dev shell and follows flake changes", () => {
+  it.effect("gives worktrees their main checkout's dev shell and follows flake changes", () => {
     const dir = tempDir();
     const project = NodePath.join(dir, "project");
     const worktree = NodePath.join(dir, "worktrees", "feature");
+    const other = NodePath.join(dir, "worktrees", "other");
     NodeFS.mkdirSync(project);
     const git = (...args: ReadonlyArray<string>) =>
       NodeChildProcess.execFileSync("git", ["-C", project, ...args], { encoding: "utf8" });
@@ -157,17 +207,38 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("DevShellEnviro
       const claudeEnvFile = devShells.claudeEnvironment.CLAUDE_ENV_FILE;
       assert.isString(claudeEnvFile);
       assert.match(devShells.environment.PROMPT_COMMAND ?? "", /^\. '/);
+      const shellIn = (cwd: string, script: string) =>
+        bashAsync(`. '${claudeEnvFile}'; ${script}`, environment, cwd);
+      // Repeats a command, sourcing the dev shell each time, until it prints `expected`.
+      const shellUntil = (cwd: string, script: string, expected: string) =>
+        shellIn(
+          cwd,
+          `for _ in $(seq 100); do out=$(${script}); [ "$out" = '${expected}' ] && break; sleep 0.1; . '${claudeEnvFile}'; done; printf '%s' "$out"`,
+        );
+
+      // The first command waits for the first capture rather than running without it.
       yield* devShells.prepare(worktree);
-      const inWorktree = () =>
-        bash(`. '${claudeEnvFile}'; printf '%s|%s' "$FROM_FLAKE" "$PATH"`, environment, worktree);
-      assert.equal(inWorktree(), `one|${NodePath.join(project, "tools")}:${path}`);
+      assert.equal(
+        yield* shellIn(worktree, `printf '%s|%s' "$FROM_FLAKE" "$PATH"`),
+        `one|${NodePath.join(project, "tools")}:${path}`,
+      );
 
       // An edited flake is captured again on the next check; running shells see it next command.
       NodeFS.writeFileSync(NodePath.join(project, "value"), "two");
       NodeFS.writeFileSync(NodePath.join(project, "flake.nix"), "{ outputs = _: { x = 1; }; }\n");
       yield* TestClock.adjust("30 seconds");
-      yield* devShells.prepare(worktree);
-      assert.equal(inWorktree().split("|")[0], "two");
+      assert.equal(yield* shellUntil(worktree, `printf '%s' "$FROM_FLAKE"`, "two"), "two");
+
+      // Another worktree starts with that dev shell at once, then gets its own.
+      git("worktree", "add", "-q", other);
+      NodeFS.writeFileSync(NodePath.join(project, "hold"), "");
+      yield* devShells.prepare(other);
+      assert.equal(
+        yield* shellIn(other, `printf '%s|%s' "$FROM_FLAKE" "$CAPTURED_IN"`),
+        `two|${worktree}`,
+      );
+      NodeFS.rmSync(NodePath.join(project, "hold"));
+      assert.equal(yield* shellUntil(other, `printf '%s' "$CAPTURED_IN"`, other), other);
     }).pipe(
       Effect.provide(
         layer.pipe(

@@ -149,11 +149,6 @@ const writeAtomic = (path: string, content: string) => {
   NodeFS.renameSync(pending, path);
 };
 // Best effort: without these files commands only stop waiting for, or start from, a capture.
-const touch = (path: string) => {
-  try {
-    NodeFS.writeFileSync(path, "", { mode: 0o600 });
-  } catch {}
-};
 const remove = (path: string) => {
   try {
     NodeFS.rmSync(path, { force: true });
@@ -231,6 +226,24 @@ const readStoredEntry = (path: string): StoredEntry | undefined => {
 };
 const writeStoredEntry = (path: string, entry: StoredEntry) =>
   writeAtomic(path, `${JSON.stringify(entry)}\n`);
+
+// Marks a running first capture. It names its directory, so a restarted server runs the capture
+// again and commands waiting for it keep waiting.
+const writeLoading = (entry: Pick<Entry, "loading" | "flake" | "cwd">) => {
+  try {
+    writeAtomic(entry.loading, `${JSON.stringify({ flake: entry.flake, cwd: entry.cwd })}\n`);
+  } catch {}
+};
+const readLoading = (path: string): Pick<Entry, "flake" | "cwd"> | undefined => {
+  try {
+    const value: unknown = JSON.parse(NodeFS.readFileSync(path, "utf8"));
+    if (typeof value !== "object" || value === null) return undefined;
+    const { flake, cwd } = value as { readonly flake?: unknown; readonly cwd?: unknown };
+    return typeof flake === "string" && typeof cwd === "string" ? { flake, cwd } : undefined;
+  } catch {
+    return undefined;
+  }
+};
 
 export class DevShellEnvironment extends Context.Service<
   DevShellEnvironment,
@@ -372,7 +385,7 @@ const make = Effect.gen(function* () {
     if (entry.running !== undefined) return entry.running;
     // Commands in a directory without a dev shell wait for this capture instead of running bare.
     const first = !NodeFS.existsSync(entry.file);
-    if (first) touch(entry.loading);
+    if (first) writeLoading(entry);
     entry.running = runPromise(
       capture(entry).pipe(
         Effect.catchCause((cause) =>
@@ -427,12 +440,24 @@ const make = Effect.gen(function* () {
       ),
   );
 
-  // Sessions kept across a restart still source these files; keep checking them. Loading markers
-  // are from captures of an earlier server, which no longer run.
+  // Sessions kept across a restart still source these files; keep checking them. A first capture
+  // that an earlier server left unfinished runs again.
+  const unfinished: Array<Entry> = [];
   for (const name of NodeFS.readdirSync(directory)) {
-    if (name.endsWith(".loading")) remove(NodePath.join(directory, name));
+    const path = NodePath.join(directory, name);
+    if (name.endsWith(".loading")) {
+      const loading = readLoading(path);
+      const entry =
+        loading !== undefined && NodeFS.existsSync(loading.cwd)
+          ? entryFor(loading.flake, loading.cwd)
+          : undefined;
+      if (entry !== undefined && !NodeFS.existsSync(entry.file)) unfinished.push(entry);
+      if (entry === undefined || entry.loading !== path || NodeFS.existsSync(entry.file))
+        remove(path);
+      continue;
+    }
     if (!name.endsWith(".json")) continue;
-    const stored = readStoredEntry(NodePath.join(directory, name));
+    const stored = readStoredEntry(path);
     if (stored !== undefined && NodeFS.existsSync(stored.cwd)) entryFor(stored.flake, stored.cwd);
   }
   writeDispatcher();
@@ -448,6 +473,7 @@ const make = Effect.gen(function* () {
       "",
     ].join("\n"),
   );
+  for (const entry of unfinished) void refresh(entry);
   yield* Effect.forkScoped(
     Effect.forever(
       Effect.sleep(POLL_INTERVAL).pipe(

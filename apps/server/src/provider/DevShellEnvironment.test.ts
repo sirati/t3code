@@ -251,6 +251,46 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("DevShellEnviro
     );
   });
 
+  it.effect("runs a first capture again that a restarted server left unfinished", () => {
+    const dir = tempDir();
+    const project = NodePath.join(dir, "project");
+    NodeFS.mkdirSync(project);
+    NodeFS.writeFileSync(NodePath.join(project, "flake.nix"), "{ outputs = _: { }; }\n");
+    NodeFS.writeFileSync(NodePath.join(project, "value"), "resumed");
+    const base = NodePath.join(dir, "base");
+    // What a server stopped during the first capture leaves behind.
+    const shells = NodePath.join(base, "userdata", "dev-shells");
+    NodeFS.mkdirSync(shells, { recursive: true });
+    NodeFS.writeFileSync(
+      NodePath.join(shells, "unfinished.loading"),
+      JSON.stringify({ flake: project, cwd: project }),
+    );
+    const environment = { PATH: `${fakeNix(dir)}:${process.env.PATH ?? ""}`, HOME: dir };
+    return Effect.gen(function* () {
+      const devShells = yield* DevShellEnvironment;
+      // The capture's own marker replaces the one found at start.
+      assert.isFalse(NodeFS.existsSync(NodePath.join(shells, "unfinished.loading")));
+      // Without a prepare call, the command waits for the capture the new server ran again.
+      assert.equal(
+        yield* bashAsync(
+          `. '${devShells.claudeEnvironment.CLAUDE_ENV_FILE}'; printf '%s' "\${FROM_FLAKE-none}"`,
+          environment,
+          project,
+        ),
+        "resumed",
+      );
+    }).pipe(
+      Effect.provide(
+        layer.pipe(
+          Layer.provide(ServerConfig.layerTest(dir, base)),
+          Layer.provide(NodeServices.layer),
+          Layer.provide(Layer.succeed(HostProcess.Environment, environment)),
+        ),
+      ),
+      Effect.ensuring(Effect.sync(() => NodeFS.rmSync(dir, { recursive: true, force: true }))),
+    );
+  });
+
   it.effect("stays out of the way when turned off", () =>
     Effect.gen(function* () {
       const devShells = yield* DevShellEnvironment;

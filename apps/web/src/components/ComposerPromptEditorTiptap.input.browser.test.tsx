@@ -1528,3 +1528,37 @@ it("delivers dictation to the original draft after switching conversations and r
   );
   expect(editorIn(screen.container).getText()).toBe("original late transcript");
 });
+
+it("follows edits made after switching back to the dictated draft", async () => {
+  const originalRef = scopeThreadRef(EnvironmentId.make("dictation-test"), ThreadId.make("back"));
+  const store = useComposerDraftStore.getState();
+  store.setPrompt(originalRef, "original draft");
+  const props = {
+    contextRecords: new Map(),
+    skills: [],
+    disabled: false,
+    placeholder: "",
+    editorRef: createRef<ComposerPromptEditorHandle>(),
+    onChange: vi.fn(),
+    onPaste: () => {},
+    captureDictationDraft: () => captureComposerDictationDraft(originalRef),
+  };
+  await using screen = await render(
+    <ComposerPromptEditor {...props} draftKey="back-thread" value="original draft" cursor={8} />,
+  );
+  const editor = editorIn(screen.container);
+  editor.commands.setTextSelection({ from: 10, to: 15 });
+  editor.view.dom.focus();
+  const target = captureDictationTarget(document)!;
+  await screen.rerender(
+    <ComposerPromptEditor {...props} draftKey="away-thread" value="different draft" cursor={0} />,
+  );
+  await screen.rerender(
+    <ComposerPromptEditor {...props} draftKey="back-thread" value="original draft" cursor={0} />,
+  );
+  // Typed after coming back: the transcript still replaces the selection captured at the start.
+  await act(() => editorIn(screen.container).commands.insertContentAt(1, "new "));
+  expect(target.apply("late transcript", false)).toBe(true);
+  expect(editorIn(screen.container).getText()).toBe("new original late transcript");
+  target.dispose();
+});

@@ -7,20 +7,31 @@ import { registerDictationEditor } from "./dictationTargets";
 type DetachedTarget = (before: EditorState, after: EditorState, submit: boolean) => boolean;
 
 const pendingDraftTargets = new Map<string, Set<(editor: Editor) => void>>();
+// Targets bound to an editor. A composer keeps its editor when it switches drafts, so ending the
+// editor's registration for a draft lets go of them, as an unmount does.
+const boundTargets = new WeakMap<Editor, Set<() => void>>();
 
 export function registerDictationTiptap(
   editor: Editor,
   captureDetached?: () => DetachedTarget | undefined,
   draftKey?: string,
 ) {
-  if (draftKey) {
-    for (const attach of pendingDraftTargets.get(draftKey) ?? []) attach(editor);
-  }
-  return registerDictationEditor(
+  // A remounted editor shows the draft already; a reused one only after its content swap.
+  const attachPending = () => {
+    if (draftKey) for (const attach of pendingDraftTargets.get(draftKey) ?? []) attach(editor);
+  };
+  attachPending();
+  editor.on("transaction", attachPending);
+  const unregister = registerDictationEditor(
     editor.view.dom,
     () => captureTiptapTarget(editor, captureDetached?.(), draftKey),
     draftKey ? dictationTargetIdForDraft(draftKey) : undefined,
   );
+  return () => {
+    editor.off("transaction", attachPending);
+    for (const release of boundTargets.get(editor) ?? []) release();
+    unregister();
+  };
 }
 
 // Session closures must not inherit the registration callback's mounted component scope.
@@ -35,27 +46,42 @@ function captureTiptapTarget(
   let currentEditor: Editor | null = editor;
   let form = editor.view.dom.closest("form");
   let disposed = false;
+  let bound = false;
   let failure: string | null = null;
   const map = ({ transaction }: { transaction: Transaction }) => {
     if (!currentEditor) return;
     bookmark = bookmark.map(transaction.mapping);
     state = currentEditor.state;
   };
-  const attach = (next: Editor) => {
-    if (disposed || !state) return;
-    if (JSON.stringify(state.doc.toJSON()) !== JSON.stringify(next.state.doc.toJSON())) return;
-    currentEditor?.off("transaction", map);
+  // Keeps the draft's last state and selection; delivery then goes to the saved draft.
+  const release = () => {
+    if (!bound || !currentEditor) return;
+    bound = false;
+    currentEditor.off("transaction", map);
+    boundTargets.get(currentEditor)?.delete(release);
+  };
+  const bind = (next: Editor) => {
     currentEditor = next;
+    bound = true;
+    next.on("transaction", map);
+    const targets = boundTargets.get(next) ?? new Set();
+    targets.add(release);
+    boundTargets.set(next, targets);
+  };
+  const attach = (next: Editor) => {
+    if (disposed || !state || (bound && currentEditor === next)) return;
+    if (JSON.stringify(state.doc.toJSON()) !== JSON.stringify(next.state.doc.toJSON())) return;
+    release();
     form = next.view.dom.closest("form");
     state = next.state;
-    next.on("transaction", map);
+    bind(next);
   };
   if (draftKey) {
     const targets = pendingDraftTargets.get(draftKey) ?? new Set();
     targets.add(attach);
     pendingDraftTargets.set(draftKey, targets);
   }
-  editor.on("transaction", map);
+  bind(editor);
   return {
     apply(text: string, submit: boolean) {
       failure = null;
@@ -64,7 +90,7 @@ function captureTiptapTarget(
         failure = "The captured editor state was released before delivery.";
         return false;
       }
-      if (editor.isDestroyed || !editor.view.dom.isConnected) {
+      if (!bound || editor.isDestroyed || !editor.view.dom.isConnected) {
         if (!detached) {
           failure = "The original editor unmounted without a saved draft destination.";
           return false;
@@ -105,7 +131,7 @@ function captureTiptapTarget(
       if (disposed) return;
       disposed = true;
       try {
-        currentEditor?.off("transaction", map);
+        release();
       } finally {
         currentEditor = null;
         state = null;

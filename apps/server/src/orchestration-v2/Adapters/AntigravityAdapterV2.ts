@@ -84,7 +84,10 @@ const AntigravityProviderCapabilitiesV2 = {
 export type AntigravityAdapterV2RuntimeInput = Omit<
   AntigravityAcpRuntimeInput,
   "spawn" | "childProcessSpawner"
-> & { readonly processEnvironment?: NodeJS.ProcessEnv };
+> & {
+  readonly processEnvironment?: NodeJS.ProcessEnv;
+  readonly session?: AcpAdapterV2RuntimeInput["session"];
+};
 
 export interface AntigravityAdapterV2Options {
   readonly instanceId: ProviderInstanceId;
@@ -109,6 +112,8 @@ export interface AntigravityAdapterV2Options {
   readonly continuationRequests?: Parameters<typeof makeAcpAdapterV2>[0]["continuationRequests"];
   /** The agent's GEMINI_HOME. Its session logs show turns that ended on an upstream error. */
   readonly profileDirectory?: string;
+  /** Picks up a session the session keeper held through a server restart. */
+  readonly keptTurn?: AcpAdapterV2Flavor["keptTurn"];
 }
 
 /**
@@ -235,6 +240,7 @@ export function makeAntigravityAcpAdapterFlavor(
     mcpOverHttp: true,
     sessionCarriesPullRequestLinking: antigravityAppendsSystemPrompt,
     makeRuntime,
+    ...(options.keptTurn === undefined ? {} : { keptTurn: options.keptTurn }),
     buildAttachmentPrompt: ({ text, attachments, resolveAttachmentPath, promptCapabilities }) =>
       buildAntigravityPrompt({
         input: text,

@@ -41,16 +41,37 @@ export const isDetachedExit = (code: number | null, signal: NodeJS.Signals | nul
 /**
  * Remembers JSON-RPC requests a provider still waits on, so a successor can show them again.
  * It only reads the stream. Claude needs none: its CLI re-sends open prompts on `initialize`.
+ * With `replyMethods`, it also tracks the client's own open requests and the results of those
+ * methods, for a successor that answers a handshake itself instead of repeating it (ACP).
  */
 export class PendingRequests {
   private readonly open = new Map<string, string>();
+  private readonly clientOpen = new Map<string, string>();
+  private readonly replies = new Map<string, string>();
   private outputTail = "";
   private inputTail = "";
   private inputFrozen = false;
 
+  private readonly replyMethods: ReadonlySet<string> | undefined;
+
+  constructor(replyMethods?: ReadonlySet<string>) {
+    this.replyMethods = replyMethods;
+  }
+
   output(chunk: Buffer | string): void {
     this.outputTail = this.scan(this.outputTail + chunk.toString(), (line, message) => {
-      if ("method" in message && "id" in message) this.open.set(String(message.id), line);
+      if ("method" in message && "id" in message) {
+        this.open.set(String(message.id), line);
+        return;
+      }
+      if (this.replyMethods === undefined || !("id" in message)) return;
+      const id = String(message.id);
+      const method = this.clientOpen.get(id);
+      if (method === undefined) return;
+      this.clientOpen.delete(id);
+      if (this.replyMethods.has(method) && "result" in message) {
+        this.replies.set(method, JSON.stringify(message.result));
+      }
     });
   }
 
@@ -62,12 +83,35 @@ export class PendingRequests {
   input(chunk: Buffer | string): void {
     if (this.inputFrozen) return;
     this.inputTail = this.scan(this.inputTail + chunk.toString(), (_line, message) => {
-      if (!("method" in message) && "id" in message) this.open.delete(String(message.id));
+      if (!("id" in message)) return;
+      if (!("method" in message)) this.open.delete(String(message.id));
+      else if (this.replyMethods !== undefined) {
+        this.clientOpen.set(String(message.id), String(message.method));
+      }
     });
   }
 
   lines(): ReadonlyArray<string> {
     return [...this.open.values()];
+  }
+
+  /** Takes over what a predecessor left open, so another restart keeps it as well. */
+  restore(record: {
+    readonly replies?: ReadonlyArray<{ readonly method: string; readonly result: string }>;
+    readonly clientRequests?: ReadonlyArray<{ readonly id: string; readonly method: string }>;
+  }): void {
+    for (const { method, result } of record.replies ?? []) this.replies.set(method, result);
+    for (const { id, method } of record.clientRequests ?? []) this.clientOpen.set(id, method);
+  }
+
+  /** The client's own requests the provider has not answered yet. */
+  clientRequests(): ReadonlyArray<{ readonly id: string; readonly method: string }> {
+    return [...this.clientOpen].map(([id, method]) => ({ id, method }));
+  }
+
+  /** The latest result of each tracked method, as JSON. */
+  replyResults(): ReadonlyArray<{ readonly method: string; readonly result: string }> {
+    return [...this.replies].map(([method, result]) => ({ method, result }));
   }
 
   private scan(text: string, visit: (line: string, message: Record<string, unknown>) => void) {
@@ -107,6 +151,14 @@ const KeptSession = Schema.Struct({
   consumers: Schema.optionalKey(Schema.Array(KeptConsumer)),
   /** Whether a continuation run picks the session up, or its next turn reattaches it. */
   continueRun: Schema.Boolean,
+  /** Handshake results a successor answers itself instead of repeating the handshake (ACP). */
+  replies: Schema.optionalKey(
+    Schema.Array(Schema.Struct({ method: Schema.String, result: Schema.String })),
+  ),
+  /** The client's own requests still open at the detach, such as an ACP prompt in flight. */
+  clientRequests: Schema.optionalKey(
+    Schema.Array(Schema.Struct({ id: Schema.String, method: Schema.String })),
+  ),
 });
 export type KeptSession = typeof KeptSession.Type;
 const decodeKeptSession = Schema.decodeUnknownOption(Schema.fromJsonString(KeptSession));
@@ -288,6 +340,8 @@ const make = Effect.gen(function* () {
     // A launcher that never let go ends with this server.
     if (!detached) return undefined;
     // Only now is the list final: requests the CLI sent until it let go still wait for an answer.
+    const replies = session.pending?.replyResults() ?? [];
+    const clientRequests = session.pending?.clientRequests() ?? [];
     const record: KeptSession = {
       providerSessionId: session.providerSessionId,
       driver: session.driver,
@@ -299,6 +353,8 @@ const make = Effect.gen(function* () {
       nativeTurnIds: activity.nativeTurnIds ?? [],
       ...(activity.consumers === undefined ? {} : { consumers: activity.consumers }),
       continueRun: activity.continueRun ?? true,
+      ...(replies.length === 0 ? {} : { replies }),
+      ...(clientRequests.length === 0 ? {} : { clientRequests }),
     };
     const file = NodePath.join(recordsDir, `${hash(session.providerSessionId)}.json`);
     NodeFS.writeFileSync(file, encodeKeptSession(record), { mode: 0o600 });

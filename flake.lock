@@ -1,5 +1,28 @@
 {
   "nodes": {
+    "dictation-api": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ],
+        "nixpkgs-darwin-intel": [
+          "nixpkgs-darwin-intel"
+        ]
+      },
+      "locked": {
+        "lastModified": 1793175244,
+        "narHash": "sha256-a6N9lXNLYr9PAapXFMS0UEeJDCX4s8XLCzMrlKB+/1s=",
+        "owner": "sirati",
+        "repo": "dictation-api",
+        "rev": "dcd031da509c7d545054aba3c82bc10b5644b004",
+        "type": "github"
+      },
+      "original": {
+        "owner": "sirati",
+        "repo": "dictation-api",
+        "type": "github"
+      }
+    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1792773339,
@@ -34,6 +57,7 @@
     },
     "root": {
       "inputs": {
+        "dictation-api": "dictation-api",
         "nixpkgs": "nixpkgs",
         "nixpkgs-darwin-intel": "nixpkgs-darwin-intel"
       }

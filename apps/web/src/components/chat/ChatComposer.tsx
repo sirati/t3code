@@ -1,5 +1,8 @@
 import { copySnapshot } from "./copySnapshot";
 import { VoiceInputSetup } from "./VoiceInputSetup";
+import { useStore } from "zustand";
+import { captureComposerDictationDraft } from "../../lib/composerDictation";
+import { dictationState, dictationTargetIdForDraft } from "../../lib/dictationState";
 import { useComposerTypingGuard } from "./useComposerTypingGuard";
 import { insertAttachmentReferencesForDraft } from "./composerAttachmentReferences";
 import type { ComposerAttachmentInsertion } from "../composerAttachmentInsertion";
@@ -478,6 +481,10 @@ export interface ChatComposerProps {
   onRestoreEditingQueuedAttachment?: ((attachment: ContractChatAttachment) => void) | undefined;
 
   onCompactContext: () => void;
+  captureDictationSubmission: () => ((prompt: string) => void) | undefined;
+  capturePendingDictationDraft: () =>
+    | { read(): string; write(value: string, submit: boolean): boolean }
+    | undefined;
   onSend: (
     e?: { preventDefault: () => void },
     dispatchMode?: ComposerDispatchMode,
@@ -1974,7 +1981,22 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   };
   const readComposerSnapshotStable = useStableCallback(readComposerSnapshot);
 
+  // The editor's broker target follows the draft and, while one is open, the pending question.
+  const dictationDraftKey = JSON.stringify([
+    composerDraftTargetKey,
+    activePendingProgress ? pendingUserInputs[0]?.requestId : null,
+    activePendingProgress?.activeQuestion?.id ?? null,
+  ]);
+  // Two dictations into one draft would reject each other's transcript, so in-app voice input
+  // waits while the system broker writes here; the broker's offers are refused while the
+  // editor is frozen for in-app voice input.
+  const brokerDictationActive = useStore(dictationState, (state) =>
+    state.sessions.some(
+      (session) => session.targetId === dictationTargetIdForDraft(dictationDraftKey),
+    ),
+  );
   const dictationDisabled =
+    brokerDictationActive ||
     !canOperateThread ||
     environmentUnavailable !== null ||
     projectSelectionRequired ||
@@ -2034,7 +2056,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   });
   const { blocksSubmission: voiceInputActive, submitAfterDictation } = speechInput;
   // A compact footer gives the dictation capsule the whole row beside the send button.
-  const dictationTakesFooter = isComposerFooterCompact && speechInput.state.phase !== "idle";
+  const dictationTakesFooter =
+    isComposerFooterCompact && (speechInput.state.phase !== "idle" || brokerDictationActive);
   const submissionTarget = activePendingProgress ? "pending-user-input" : "provider-turn";
   const submissionBlocked = isComposerSubmissionBlocked({
     submissionTarget,
@@ -3795,6 +3818,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   )}
                 </button>
                 {collapsedComposerImagePreviews}
+                <span
+                  data-dictation-composer-controls=""
+                  className="flex shrink-0 items-center empty:hidden"
+                />
                 <CollapsedComposerStopAction
                   key={`${environmentId}:${activeThreadId ?? "new"}`}
                   canOperateThread={canOperateThread}
@@ -3923,6 +3950,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               {composerAttachmentFileList}
 
               <div
+                data-dictation-composer-editor=""
                 className={cn(
                   "relative transition-opacity duration-150",
                   composerSendHeld && "opacity-65",
@@ -3937,7 +3965,15 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 ) : null}
                 <ComposerContextActionsContext value={composerContextActions}>
                   <ComposerPromptEditor
-                    draftKey={composerDraftTargetKey}
+                    draftKey={dictationDraftKey}
+                    captureDictationDraft={() =>
+                      activePendingProgress
+                        ? props.capturePendingDictationDraft()
+                        : captureComposerDictationDraft(
+                            composerDraftTarget,
+                            props.captureDictationSubmission(),
+                          )
+                    }
                     // Switching threads lands focus here, so the label names the thread.
                     ariaLabel={
                       activeThread
@@ -4025,6 +4061,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     data-chat-composer-mobile-pending-actions="true"
                     className="absolute bottom-0 right-0 flex items-center justify-end gap-1"
                   >
+                    <span
+                      data-dictation-composer-controls=""
+                      className="flex shrink-0 items-center empty:hidden"
+                    />
                     <ComposerPrimaryActions
                       compact
                       canOperateThread={canOperateThread}
@@ -4095,6 +4135,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   >
                     {composerControls}
                   </div>
+                  <span
+                    data-dictation-composer-controls=""
+                    className="flex shrink-0 items-center empty:hidden"
+                  />
                   <ComposerFooterPrimaryActions
                     // Stop state belongs to one thread; the composer stays mounted across threads.
                     key={`${environmentId}:${activeThreadId ?? "new"}`}

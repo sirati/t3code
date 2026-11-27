@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./dictationSessionTargets": {
+      "types": "./src/dictationSessionTargets.ts",
+      "import": "./src/dictationSessionTargets.ts"
+    },
     "./png": {
       "types": "./src/png.ts",
       "import": "./src/png.ts"

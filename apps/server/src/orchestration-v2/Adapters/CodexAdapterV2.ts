@@ -117,6 +117,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import { resolveAttachmentPath, resolveAttachmentPathById } from "../../attachmentStore.ts";
 import * as PortScanner from "../../preview/PortScanner.ts";
+import { AGENT_SHELL_HISTORY_ENVIRONMENT } from "../../provider/agentShellHistory.ts";
 import { getCodexServiceTierOptionValue } from "../../codexModelOptions.ts";
 import { ServerConfig } from "../../config.ts";
 import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
@@ -1710,6 +1711,14 @@ function codexStdioMcpServerNames(mcpServers: unknown): ReadonlyArray<string> {
     )
     .map(([name]) => name);
 }
+/** Per-thread shell variables, which reach every shell Codex starts for the thread. */
+const codexShellEnvironmentConfig = (environment: Readonly<Record<string, string>>) =>
+  Object.fromEntries(
+    Object.entries(environment).map(([name, value]) => [
+      `shell_environment_policy.set.${name}`,
+      value,
+    ]),
+  );
 
 function codexThreadRuntimeParams(input: {
   readonly threadId: ThreadId | null;
@@ -1749,6 +1758,7 @@ function codexThreadRuntimeParams(input: {
               ]),
             ),
           }),
+      ...codexShellEnvironmentConfig(AGENT_SHELL_HISTORY_ENVIRONMENT),
       ...(t3Server === undefined
         ? {}
         : {

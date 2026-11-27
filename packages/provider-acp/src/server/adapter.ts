@@ -25,6 +25,7 @@ import {
   type ProviderInteractionMode,
   type ProviderDriverKind,
   type ProviderRequestKind,
+  type ProviderSessionId,
   type ProviderThreadId,
   type ProviderUserInputAnswers,
   type RuntimeMode,
@@ -258,6 +259,13 @@ const ACP_PROMPT_ACTIVITY_UPDATES: ReadonlySet<string> = new Set([
   "compaction_summary_chunk",
 ]);
 
+/** A session's work, as a host that keeps busy sessions through its own restart reads it. */
+export interface AcpSessionActivity {
+  readonly busy: boolean;
+  readonly threadId: ThreadId;
+  readonly providerThreadId: ProviderThreadId;
+}
+
 export interface AcpAdapterV2RuntimeInput {
   readonly cwd: string;
   readonly runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
@@ -280,6 +288,12 @@ export interface AcpAdapterV2RuntimeInput {
   readonly onOutgoingResponse?: AcpSessionRuntime.AcpSessionRuntimeOptions["onOutgoingResponse"];
   readonly onIncomingRequest?: AcpSessionRuntime.AcpSessionRuntimeOptions["onIncomingRequest"];
   readonly onUndecodableNotification?: AcpSessionRuntime.AcpSessionRuntimeOptions["onUndecodableNotification"];
+  /** The provider session and its work, for hosts that keep busy sessions through a restart. */
+  readonly session?: {
+    readonly providerSessionId: ProviderSessionId;
+    /** Reads refs only, so a shutdown can run it synchronously. */
+    readonly activity: Effect.Effect<AcpSessionActivity | undefined>;
+  };
 }
 
 export type AcpAdapterV2NativeLogging = Pick<
@@ -439,6 +453,18 @@ interface AcpPromptOutcomeFailure {
 }
 
 export interface AcpAdapterV2Flavor {
+  /**
+   * A continuation turn on a session the host kept running through its restart. With
+   * `promptInFlight` the turn takes over that prompt: the host answers this turn's
+   * `session/prompt` with the kept one's result. `release` lets the session's held output
+   * through, once the turn is registered.
+   */
+  readonly keptTurn?: (input: {
+    readonly providerSessionId: ProviderSessionId;
+    readonly providerThreadId: ProviderThreadId;
+  }) => Effect.Effect<
+    { readonly promptInFlight: boolean; readonly release: Effect.Effect<void> } | undefined
+  >;
   readonly buildAttachmentPrompt?: (input: {
     readonly text: string;
     readonly attachments: ReadonlyArray<ChatAttachment>;
@@ -3055,6 +3081,19 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             );
           },
         );
+        const sessionActivity: Effect.Effect<AcpSessionActivity | undefined> = Ref.get(
+          activeTurn,
+        ).pipe(
+          Effect.map((turn) =>
+            turn === null
+              ? undefined
+              : {
+                  busy: true,
+                  threadId: turn.input.threadId,
+                  providerThreadId: turn.input.providerThread.id,
+                },
+          ),
+        );
         const makeRuntimeInput = (
           runtimeGeneration: number,
           agentRequests: Set<string>,
@@ -3098,6 +3137,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                     }),
                 }),
             onUndecodableNotification: noteUndecodableNotification,
+            session: { providerSessionId: input.providerSessionId, activity: sessionActivity },
             onOutgoingResponseFailure: (requestId, error) =>
               Ref.modify(nativeResponseAcknowledgements, (current) => {
                 const entry = current.get(requestId);
@@ -9884,8 +9924,17 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             });
             yield* Ref.set(suppressPostSettleMonitorPrompt, false);
             yield* Ref.set(handledBackgroundTaskIdsInActiveTurn, new Set());
+            // A session the host kept through its restart; its prompt in flight becomes this turn's.
+            const kept =
+              flavor.keptTurn !== undefined && acpIsProviderContinuationMessage(turnInput.message)
+                ? yield* flavor.keptTurn({
+                    providerSessionId: input.providerSessionId,
+                    providerThreadId: turnInput.providerThread.id,
+                  })
+                : undefined;
             // Continuations consume existing wake traffic without re-prompting ACP.
             const isContinuationTurn =
+              kept?.promptInFlight !== true &&
               (postSettleContinuationEnabled || followsAgentWorkState) &&
               acpIsProviderContinuationMessage(turnInput.message);
             const isAppOwnedWakeTurn = acpIsAppOwnedWakeTurn(turnInput.message);
@@ -10020,6 +10069,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               }
             }
             yield* Ref.set(activeTurn, context);
+            if (kept !== undefined) yield* kept.release;
             yield* Ref.set(stoppedRunQuarantine, false);
             const runningTurn = providerTurnPayload(context, "running", null);
             yield* emitProviderEvent({

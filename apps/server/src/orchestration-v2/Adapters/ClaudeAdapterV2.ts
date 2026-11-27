@@ -85,6 +85,12 @@ import {
 import { AgentScope } from "@t3tools/shared/AgentScope";
 import * as ProviderProcesses from "../../process/providerProcesses.ts";
 import * as SpawnWorker from "../../process/SpawnWorker.ts";
+import {
+  isDetachedExit,
+  SessionKeeper,
+  type SessionActivity,
+} from "../../provider/SessionKeeper.ts";
+import { spawnKeeperBackedProcess } from "../../provider/keeperProcess.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { applyClaudePromptEffortPrefix } from "@t3tools/shared/model";
 import { compareSemverVersions } from "@t3tools/shared/semver";
@@ -806,6 +812,8 @@ export interface ClaudeAgentSdkQueryOpenInput {
   readonly providerSessionId: OrchestrationV2ProviderSession["id"];
   /** Reports the step the CLI is on before the turn can start, such as `mcp`; `undefined` ends it. */
   readonly onStartupPhase?: (phase: string | undefined) => Effect.Effect<void>;
+  /** What the session is doing, so a busy one can outlive a server restart. */
+  readonly activity?: Effect.Effect<SessionActivity | undefined>;
 }
 
 export interface ClaudeAgentSdkQuerySession {
@@ -1738,6 +1746,8 @@ export const layerQueryRunner: Layer.Layer<
       );
       return { refresh: tracker.refresh, work, settle: tracker.settle, stop };
     };
+    const runSync = Effect.runSyncWith(yield* Effect.context<never>());
+    const sessionKeeper = Option.getOrUndefined(yield* Effect.serviceOption(SessionKeeper));
 
     // The open span below is the tracing boundary for both attempts.
     const openQuery = Effect.fnUntraced(function* (input: ClaudeAgentSdkQueryOpenInput) {
@@ -1796,18 +1806,35 @@ export const layerQueryRunner: Layer.Layer<
           [PortScanner.AGENT_THREAD_ENV]: input.threadId,
         },
       };
+      // With a keeper, the CLI runs under it and can outlive this server; a kept one is reattached.
+      const keeperPath = sessionKeeper?.keeperPath;
+      const keeperSocket = sessionKeeper?.socketFor(input.providerSessionId);
+      const reattach = sessionKeeper?.takeReattach(input.providerSessionId);
       // The SDK can prepend a scope wrapper to native binaries; script entries run through node.
       const binaryPath = queryOptions.pathToClaudeCodeExecutable;
       const launch =
-        binaryPath === undefined || CLAUDE_SCRIPT_EXTENSIONS.some((ext) => binaryPath.endsWith(ext))
+        reattach !== undefined ||
+        binaryPath === undefined ||
+        CLAUDE_SCRIPT_EXTENSIONS.some((ext) => binaryPath.endsWith(ext))
           ? undefined
-          : yield* agentScope.wrap({
-              command: binaryPath,
-              args: [],
-              name: "claude",
-              threadId: input.threadId,
-              env: queryOptions.env,
-            });
+          : yield* agentScope.wrap(
+              keeperPath === undefined || keeperSocket === undefined
+                ? {
+                    command: binaryPath,
+                    args: [],
+                    name: "claude",
+                    threadId: input.threadId,
+                    env: queryOptions.env,
+                  }
+                : {
+                    command: keeperPath,
+                    args: ["serve", keeperSocket, "--", binaryPath],
+                    name: "claude",
+                    threadId: input.threadId,
+                    env: queryOptions.env,
+                    survivesRestart: true,
+                  },
+            );
       const options =
         launch === undefined || launch.args.length === 0
           ? queryOptions
@@ -1816,8 +1843,9 @@ export const layerQueryRunner: Layer.Layer<
               pathToClaudeCodeExecutable: launch.command,
               executableArgs: [...launch.args, ...(queryOptions.executableArgs ?? [])],
             };
-      const unit = launch?.unit;
-      const stopScope = unit === undefined ? undefined : () => void runFork(agentScope.stop(unit));
+      const unit = reattach?.unit ?? launch?.unit;
+      const stopScope =
+        unit === undefined || unit === null ? undefined : () => void runFork(agentScope.stop(unit));
       // Only a CLI that fails before its first message explains itself on
       // stderr. The known root refusal becomes a curated failure; any other
       // stderr can hold private text, so it stays out of turn failures.
@@ -1829,10 +1857,56 @@ export const layerQueryRunner: Layer.Layer<
         if (answered) return;
         stderrTail = (stderrTail + text).slice(-CLAUDE_STDERR_TAIL_LENGTH);
       };
+      const spawnKept = (spawnOptions: ClaudeSpawnOptions) => {
+        if (keeperPath === undefined || keeperSocket === undefined || sessionKeeper === undefined) {
+          return undefined;
+        }
+        const child = spawnKeeperBackedProcess(spawnOptions, {
+          keeperPath,
+          socket: keeperSocket,
+          reattach,
+          serveIncluded: launch !== undefined && launch.args.length > 0,
+          released:
+            reattach === undefined
+              ? undefined
+              : sessionKeeper.holdReattached(input.providerSessionId, []),
+          stderr: (text) => {
+            appendStderr(text);
+            options.stderr?.(text);
+          },
+        });
+        stderrClosed = new Promise((resolve) => {
+          if (child.stderr === null || child.stderr.closed) resolve();
+          else child.stderr.once("close", resolve);
+        });
+        child.once("exit", (code, signal) => {
+          // A detached session lives on in its keeper, scope included.
+          if (isDetachedExit(code, signal)) return;
+          try {
+            signalProcessGroup(child.pid ?? 0, "SIGKILL");
+          } catch {}
+          stopScope?.();
+        });
+        const unregister = sessionKeeper.register({
+          providerSessionId: input.providerSessionId,
+          driver: CLAUDE_PROVIDER,
+          pid: child.pid ?? 0,
+          socket: keeperSocket,
+          unit: unit ?? undefined,
+          pending: undefined,
+          activity: () => (input.activity === undefined ? undefined : runSync(input.activity)),
+          exited: new Promise((resolve) => child.once("exit", () => resolve())),
+        });
+        child.once("exit", unregister);
+        // Node's typings make stdin and stdout nullable; all three are pipes.
+        return child as ClaudeSpawnedProcess;
+      };
       let descendants: ReturnType<typeof trackDescendants> | undefined;
       const spawnProcess =
         options.spawnClaudeCodeProcess ??
         ((spawnOptions: ClaudeSpawnOptions) => {
+          const kept = spawnKept(spawnOptions);
+          if (kept !== undefined) return kept;
           if (platform !== "win32") {
             // Node can report "exit" before it has read the stderr the CLI wrote.
             let stderrDone = () => {};
@@ -6240,6 +6314,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
       compileClaudeModelSelection(modelSelection, modelCatalog).apiModelId,
     ) ??
     null;
+  const sessionKeeper = Option.getOrUndefined(yield* Effect.serviceOption(SessionKeeper));
   const continuationRequests = adapterOptions.continuationRequests ?? {
     offer: () => Effect.void,
   };
@@ -6512,6 +6587,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
         // Wake buffers replay result frames, so ledger growth is measured once on arrival.
         const resultLedgerUsage = new WeakMap<SDKMessage, ClaudeLedgerUsage>();
         const resultsReportingNewContextWindow = new WeakSet<SDKMessage>();
+        // The session's turn state is defined further down; the runner reads it lazily.
+        let sessionActivity: Effect.Effect<SessionActivity | undefined> = Effect.undefined;
         // A worktree handoff changes the project settings even within one session.
         let bypassCache: { cwd: string | null; availability: ClaudeBypassAvailability } | null =
           null;
@@ -13583,8 +13660,11 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           });
         });
 
-        const canUseTool: CanUseTool = (toolName, toolInput, callbackOptions) =>
-          runPromise(canUseToolEffect(toolName, toolInput, callbackOptions));
+        const canUseTool: CanUseTool = async (toolName, toolInput, callbackOptions) => {
+          // A reattached CLI re-sends its open prompts on initialize, before the continuation turn attaches.
+          await sessionKeeper?.whenReattached(input.providerSessionId);
+          return runPromise(canUseToolEffect(toolName, toolInput, callbackOptions));
+        };
 
         const onElicitationEffect = Effect.fn("ClaudeAdapterV2.onElicitation")(function* (
           request: ElicitationRequest,
@@ -13743,10 +13823,14 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               } satisfies ElicitationResult);
         });
 
-        const onElicitation: NonNullable<ClaudeQueryOptions["onElicitation"]> = (
+        const onElicitation: NonNullable<ClaudeQueryOptions["onElicitation"]> = async (
           request,
           callbackOptions,
-        ) => runPromise(onElicitationEffect(request, callbackOptions));
+        ) => {
+          // Like canUseTool: a reattached CLI's open prompt must wait for its continuation turn.
+          await sessionKeeper?.whenReattached(input.providerSessionId);
+          return runPromise(onElicitationEffect(request, callbackOptions));
+        };
 
         const onUserDialog: NonNullable<ClaudeQueryOptions["onUserDialog"]> = (
           request,
@@ -14224,6 +14308,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   options: queryOptions,
                   ...(turnInput.resume ? { resume: true } : {}),
                   onStartupPhase: reportStartupPhase,
+                  activity: Effect.suspend(() => sessionActivity),
                 })
                 .pipe(
                   Effect.map((querySession) => ({ program, querySession })),
@@ -14659,6 +14744,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               heldResult: undefined,
               executedModel: undefined,
             };
+            // Set when this continuation picks up a turn kept across a server restart.
+            let reattached = false;
             const attachTurn = Effect.gen(function* () {
               // Set before claiming: a query that exits after the claim finalizes this turn; one that exits before it fails the start.
               yield* Ref.set(activeTurn, context);
@@ -14678,6 +14765,16 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                     ? {}
                     : { cause: querySession.exitCause }),
                 });
+              }
+              // A session kept across a restart releases its held output into this continuation.
+              const kept = isClaudeProviderContinuationTurn(turnInput)
+                ? sessionKeeper?.reattachedTurns(input.providerSessionId)
+                : undefined;
+              if (kept !== undefined) {
+                reattached = true;
+                // The kept native turn is already open, so no wake-turn start is coming.
+                context.nativeWakeStarted = true;
+                yield* kept.release;
               }
               if (
                 !isClaudeProviderContinuationTurn(turnInput) &&
@@ -14790,7 +14887,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   ? latch?.end?.type !== "result"
                   : (yield* Ref.get(absorbedWakes)).has(nativeThreadId);
                 if (!leavesLaterWake) yield* forgetAbsorbedWake(nativeThreadId);
-                if (drained.length === 0) {
+                // A kept turn's output is still on its way; the CLI's own result ends it.
+                if (drained.length === 0 && !reattached) {
                   if (turnInput.resume) return;
                   const completedAt = yield* DateTime.now;
                   yield* finalizeActiveTurn({ context, status: "completed", completedAt });
@@ -15317,6 +15415,51 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           return found && !unreadable ? ("empty" as const) : ("missing" as const);
         });
 
+        const pendingBackgroundWork = Effect.gen(function* () {
+          // A wakeup can be up to an hour out, past the idle timeout, and dies with the process.
+          if (scheduledWakeupsByNativeThread.size > 0) {
+            return true;
+          }
+          for (const roster of (yield* Ref.get(pendingBackgroundTasksByNativeThread)).values()) {
+            if (roster.size > 0) {
+              return true;
+            }
+          }
+          for (const subagent of (yield* Ref.get(sessionSubagentsByTaskId)).values()) {
+            if (subagent.task.status === "running") {
+              return true;
+            }
+          }
+          const buffers = yield* Ref.get(wakeBuffers);
+          for (const entry of buffers.values()) {
+            if (
+              entry.messages.some(
+                (message) =>
+                  message.type === "user" ||
+                  message.type === "assistant" ||
+                  message.type === "result",
+              )
+            ) {
+              return true;
+            }
+          }
+          return false;
+        });
+        // A turn, a request, or background work in flight keeps the session through a restart.
+        sessionActivity = Effect.gen(function* () {
+          const active = yield* Ref.get(activeTurn);
+          const turnInput = active?.input ?? (yield* Ref.get(queryContext))?.lastTurn?.input;
+          if (turnInput === undefined) return undefined;
+          const busy =
+            active !== null ||
+            (yield* Ref.get(pendingRuntimeRequests)).size > 0 ||
+            (yield* pendingBackgroundWork);
+          return {
+            busy,
+            threadId: turnInput.threadId,
+            providerThreadId: turnInput.providerThread.id,
+          };
+        });
         const runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime = {
           instanceId: adapterOptions.instanceId,
           driver: CLAUDE_PROVIDER,
@@ -15325,36 +15468,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           getModelContextWindow: (selection) => claudeContextWindow(selection) ?? undefined,
           events: Stream.fromEffectRepeat(Queue.take(events)),
           backgroundTasksEndWithProcess: true,
-          hasPendingBackgroundWork: Effect.gen(function* () {
-            // A wakeup can be up to an hour out, past the idle timeout, and dies with the process.
-            if (scheduledWakeupsByNativeThread.size > 0) {
-              return true;
-            }
-            for (const roster of (yield* Ref.get(pendingBackgroundTasksByNativeThread)).values()) {
-              if (roster.size > 0) {
-                return true;
-              }
-            }
-            for (const subagent of (yield* Ref.get(sessionSubagentsByTaskId)).values()) {
-              if (subagent.task.status === "running") {
-                return true;
-              }
-            }
-            const buffers = yield* Ref.get(wakeBuffers);
-            for (const entry of buffers.values()) {
-              if (
-                entry.messages.some(
-                  (message) =>
-                    message.type === "user" ||
-                    message.type === "assistant" ||
-                    message.type === "result",
-                )
-              ) {
-                return true;
-              }
-            }
-            return false;
-          }),
+          hasPendingBackgroundWork: pendingBackgroundWork,
           // Untraced: the run's event stream calls this once per provider event.
           hasPendingBackgroundWorkForThread: Effect.fnUntraced(function* (providerThread, options) {
             const nativeThreadId = providerThread.nativeThreadRef?.nativeId;

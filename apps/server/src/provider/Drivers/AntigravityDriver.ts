@@ -7,6 +7,7 @@ import {
   settingsSecretLiteral,
 } from "@t3tools/contracts";
 import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
+import { AgentScope, AgentScopeThreadId } from "@t3tools/shared/AgentScope";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { resolveSelfInvocation } from "@t3tools/shared/nodeRuntime";
 import {
@@ -69,6 +70,8 @@ import {
 } from "../../orchestration-v2/Adapters/AntigravityAdapterV2.ts";
 import { makeAcpNativeLoggerFactory } from "@t3tools/provider-acp/server/nativeLogging";
 import { ProviderDriverError } from "../Errors.ts";
+import { makeAcpKeeperSpawner, unscopedAgentScope } from "../acpKeeper.ts";
+import { SessionKeeper } from "../SessionKeeper.ts";
 import { makeAntigravityProvider } from "../AntigravityProvider.ts";
 import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
 import * as ModelCatalog from "@t3tools/provider-core/server/ModelCatalog";
@@ -149,6 +152,9 @@ export const AntigravityDriver: ProviderDriver<
     const modelCatalog = yield* ModelCatalog.ModelCatalog;
     const currentCatalog = modelCatalog.current(DRIVER);
     const continuationRequests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
+    // With the session keeper on, agents outlive a server restart while they work.
+    const sessionKeeper = Option.getOrUndefined(yield* Effect.serviceOption(SessionKeeper));
+    const keeperPath = sessionKeeper?.keeperPath;
     const makeNativeLogger = yield* makeAcpNativeLoggerFactory();
     const settings = { ...config, enabled } satisfies AntigravitySettings;
     const auth: AntigravityAuthConfig = {
@@ -316,20 +322,41 @@ export const AntigravityDriver: ProviderDriver<
     > {
       // `buildAntigravityAcpSpawnInput` sets `extendEnv: false`, so thread variables only reach the
       // agent's shell through `baseEnv`.
-      const { processEnvironment: threadEnvironment, ...runtimeInput } = input;
+      const { processEnvironment: threadEnvironment, session, ...runtimeInput } = input;
       const { executable, spawn } = yield* prepareSpawn(
         runtimeInput.cwd,
         threadEnvironment === undefined
           ? processEnvironment
           : { ...processEnvironment, ...threadEnvironment },
       );
+      const agentScope = yield* AgentScope;
+      const kept =
+        sessionKeeper === undefined || keeperPath === undefined || session === undefined
+          ? undefined
+          : makeAcpKeeperSpawner({
+              spawner,
+              keeper: sessionKeeper,
+              keeperPath,
+              agentScope,
+              threadId: yield* AgentScopeThreadId,
+              providerSessionId: session.providerSessionId,
+              driver: DRIVER,
+              activity: session.activity,
+            });
       const runtime = yield* makeAntigravityAcpRuntime({
         ...runtimeInput,
         runtimeVersion: executable.version,
         authMethod: auth.authMethod,
-        childProcessSpawner: spawner,
+        childProcessSpawner: kept ?? spawner,
         spawn,
-      }).pipe(Effect.provideService(SecureRandom.SecureRandom, random));
+      }).pipe(
+        Effect.provideService(SecureRandom.SecureRandom, random),
+        // The keeper spawner scoped the agent already, in a scope that outlives the server.
+        Effect.provideService(
+          AgentScope,
+          kept === undefined ? agentScope : unscopedAgentScope(agentScope),
+        ),
+      );
       // A custom or PATH executable has no version until it answers initialize.
       const startCompatible = Effect.fn("AntigravityDriver.startCompatible")(function* () {
         const version = (yield* runtime.initialize()).agentInfo?.version;
@@ -625,6 +652,17 @@ export const AntigravityDriver: ProviderDriver<
           : Effect.void;
       },
       continuationRequests,
+      ...(sessionKeeper === undefined || keeperPath === undefined
+        ? {}
+        : {
+            keptTurn: ({ providerSessionId, providerThreadId }) =>
+              Effect.sync(() => {
+                const turns = sessionKeeper.reattachedTurns(providerSessionId, providerThreadId);
+                return turns === undefined
+                  ? undefined
+                  : { promptInFlight: turns.nativeTurnIds.length > 0, release: turns.release };
+              }),
+          }),
       nativeLogging: (threadId) =>
         makeNativeLogger({
           nativeEventLogger: loggers.native,

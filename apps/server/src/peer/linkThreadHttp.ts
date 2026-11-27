@@ -20,6 +20,7 @@ import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import { eventStreamResponse } from "../eventStreamResponse.ts";
 import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
+import * as ProxyLimitRecoveryWire from "../orchestration-v2/ProxyLimitRecoveryWire.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { subscribeOrchestrationV2Thread } from "../ws.ts";
@@ -104,6 +105,7 @@ const streamRoute = HttpRouter.add(
       acceptBoundedSnapshot: true,
     }).pipe(Effect.option);
     if (items._tag === "None") return refusal(500, "thread_read_failed");
+    const request = yield* HttpServerRequest.HttpServerRequest;
     return withLinkExpiry(
       eventStreamResponse(
         items.value.pipe(
@@ -111,7 +113,12 @@ const streamRoute = HttpRouter.add(
           Stream.catchCause(() => Stream.empty),
           Stream.interruptWhen(admitted.revoked),
         ),
-        encodeStreamItem,
+        ProxyLimitRecoveryWire.declaresProxyLimitRecovery(request.url)
+          ? encodeStreamItem
+          : (item) =>
+              encodeStreamItem(item).pipe(
+                Effect.map(ProxyLimitRecoveryWire.withoutProxyLimitRecoveriesInJson),
+              ),
       ),
       admitted.linkExpiresAt,
     );

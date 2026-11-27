@@ -1,10 +1,12 @@
 import {
+  CLIENT_CAPABILITIES_QUERY_PARAM,
   OrchestrationV2GetTurnItemResult,
   OrchestrationV2ThreadHistoryPage,
   OrchestrationV2ThreadStreamItem,
   PEER_LINK_THREAD_HISTORY_ROUTE,
   PEER_LINK_THREAD_ITEM_ROUTE,
   PEER_LINK_THREAD_STREAM_ROUTE,
+  PROXY_LIMIT_RECOVERY_CAPABILITY,
   type PeerLinkError,
   type PeerLinkThreadHistoryInput,
   type PeerLinkThreadInput,
@@ -231,7 +233,9 @@ const make = Effect.gen(function* () {
 
   const subscribe: PeerThreadRelay["Service"]["subscribe"] = (input) =>
     Stream.unwrap(
-      open(input, PEER_LINK_THREAD_STREAM_ROUTE, {}).pipe(
+      open(input, PEER_LINK_THREAD_STREAM_ROUTE, {
+        [CLIENT_CAPABILITIES_QUERY_PARAM]: PROXY_LIMIT_RECOVERY_CAPABILITY,
+      }).pipe(
         Effect.map(({ label, response }) =>
           response.stream.pipe(
             Stream.timeoutOrElse({

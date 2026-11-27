@@ -22,6 +22,7 @@ import {
   RemoteEnvironmentAuthFetchError,
   RemoteEnvironmentAuthTimeoutError,
   type RemoteEnvironmentRequestError,
+  withProxyLimitRecoveryCapability,
 } from "../rpc/http.ts";
 
 export interface EnvironmentHttpAuthHeaders {
@@ -183,7 +184,9 @@ const executeEnvironmentRequest = Effect.fnUntraced(function* <
 > {
   let httpBaseUrl = input.prepared.httpBaseUrl;
   const requestUrlFor = (baseUrl: string) =>
-    input.url(makeEnvironmentHttpApiUrlBuilder(baseUrl)[input.group]);
+    withProxyLimitRecoveryCapability(
+      input.url(makeEnvironmentHttpApiUrlBuilder(baseUrl)[input.group]),
+    );
   return yield* Effect.gen(function* () {
     let rejectedAccessToken: string | undefined;
     for (;;) {

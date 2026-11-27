@@ -23,6 +23,7 @@ vp run dev
 ```
 
 Open the pairing URL printed by the dev runner (the bare origin does not authenticate a new browser). Prefer a container? See [Dev container](./01_devcontainer.md).
+For Nix and NixOS, see [Nix development and builds](./06_nix.md).
 
 ## Forge mirror (optional)
 

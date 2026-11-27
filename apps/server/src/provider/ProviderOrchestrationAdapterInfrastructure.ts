@@ -14,6 +14,7 @@ import * as ProviderContinuationRequests from "@t3tools/provider-core/server/Pro
 import * as HostProcess from "@t3tools/shared/HostProcess";
 
 import * as SessionKeeper from "./SessionKeeper.ts";
+import * as DevShellEnvironment from "./DevShellEnvironment.ts";
 
 export type ProviderOrchestrationAdapterInfrastructure =
   | ClaudeAdapterV2.ClaudeAgentSdkQueryRunner
@@ -21,7 +22,8 @@ export type ProviderOrchestrationAdapterInfrastructure =
   | CursorAgentSdk.CursorAgentSdkRunner
   | CursorSdk.CursorSdk
   | IdAllocator.IdAllocatorV2
-  | SessionKeeper.SessionKeeper;
+  | SessionKeeper.SessionKeeper
+  | DevShellEnvironment.DevShellEnvironment;
 
 // Subagent threads created before short ids keep their stored id when an adapter resumes them.
 export const layerIdAllocator = Layer.unwrap(
@@ -76,5 +78,5 @@ export const layer = Layer.mergeAll(
   CursorSdk.layer,
   layerIdAllocator,
   ProviderContinuationRequests.layer,
-  // The Claude runner and Codex factory spawn through the keeper, so it sits underneath them.
-).pipe(Layer.provideMerge(SessionKeeper.layer));
+  // The Claude runner and Codex factory spawn through the keeper, in the project's dev shell.
+).pipe(Layer.provideMerge(SessionKeeper.layer), Layer.provideMerge(DevShellEnvironment.layer));

@@ -86,3 +86,7 @@ Usually the provider CLI is not installed, not signed in, or not on the `PATH` o
 ## Do agent commands end up in my shell history?
 
 No. Claude and Codex run their commands in shells that skip your `~/.bashrc`, and Codex's shells are interactive, so bash would save their commands to `~/.bash_history` on exit and cut the file to its default 500 lines. T3 Code starts both with an empty `HISTFILE`, which every shell they open inherits, so bash saves nothing. Running `codex` or `claude` yourself outside T3 Code does not get this.
+
+## Do agents get my project's nix dev shell?
+
+Yes, on macOS and Linux with `nix` on the server's `PATH`. When the project's main checkout has a `flake.nix`, T3 Code runs `nix develop` once for each directory a Claude or Codex session works in, worktrees included, and keeps the variables it sets. Their shells then load those variables before each command, so commands do not wait on nix. A new worktree starts with the dev shell of another directory of the same project while its own `nix develop` runs. Only the first time a project's dev shell is loaded do commands wait for it, for up to five minutes; the session itself starts right away. When the flake's `.nix` files or `flake.lock` change, T3 Code captures the dev shell again within about 30 seconds, and running sessions pick it up with their next command. If `nix develop` fails, agents keep the last working dev shell. Set `T3CODE_NIX_DEV_SHELL=0` on the server to turn this off.

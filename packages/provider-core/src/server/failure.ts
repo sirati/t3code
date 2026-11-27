@@ -325,6 +325,9 @@ function boundedText(value: string, maxLength: number): string {
 }
 
 const decodeVerificationUrl = Schema.decodeUnknownOption(GoogleAccountVerificationUrl);
+export function proxyRecoveryIdFromText(text: string): string | undefined {
+  return /\[cliproxy-recovery:([A-Za-z0-9_-]{16})\]/.exec(text)?.[1];
+}
 
 export function makeProviderFailure(input: {
   readonly cause?: unknown;
@@ -334,6 +337,7 @@ export function makeProviderFailure(input: {
   readonly retryable?: boolean | null;
   readonly resetAt?: string | null;
   readonly verificationUrl?: unknown;
+  readonly proxyRecoveryId?: string | undefined;
 }): OrchestrationV2ProviderFailure {
   const curated = curatedCauseMessages(input.cause);
   const requestTooLarge =
@@ -342,6 +346,7 @@ export function makeProviderFailure(input: {
   const rawMessage = requestTooLarge
     ? REQUEST_TOO_LARGE_MESSAGE
     : (input.message ?? curated.known ?? curated.category ?? DEFAULT_PROVIDER_FAILURE_MESSAGE);
+  const proxyRecoveryId = input.proxyRecoveryId ?? proxyRecoveryIdFromText(rawMessage);
   const message = boundedText(rawMessage, MAX_PROVIDER_FAILURE_MESSAGE_LENGTH);
   const rawCode = input.code ?? stringField(input.cause, "code") ?? null;
   const code =
@@ -349,11 +354,12 @@ export function makeProviderFailure(input: {
   const verificationUrl = Option.getOrUndefined(decodeVerificationUrl(input.verificationUrl));
 
   return {
-    class: input.class ?? "unknown",
+    class: proxyRecoveryId ? "usage_limit" : (input.class ?? "unknown"),
     message: message || DEFAULT_PROVIDER_FAILURE_MESSAGE,
     code,
     retryable: requestTooLarge ? false : (input.retryable ?? null),
-    ...(input.class === "usage_limit" &&
+    ...(proxyRecoveryId ? { proxyRecoveryId } : {}),
+    ...((input.class === "usage_limit" || proxyRecoveryId !== undefined) &&
     input.resetAt != null &&
     Number.isFinite(Date.parse(input.resetAt))
       ? { resetAt: DateTime.formatIso(DateTime.makeUnsafe(input.resetAt)) }

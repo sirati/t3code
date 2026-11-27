@@ -34,10 +34,12 @@ export function UsageLimitRecoveryCard({
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const resetAt = thread.runtime?.usageLimitResetAt ?? null;
+  const proxyRecoveryId = thread.runtime?.proxyRecoveryId;
   const canSchedule =
     thread.settledOverride !== "settled" &&
-    resetAt !== null &&
-    Date.parse(resetAt) > Date.parse(thread.latestRun?.completedAt ?? thread.updatedAt);
+    (Boolean(proxyRecoveryId) ||
+      (resetAt !== null &&
+        Date.parse(resetAt) > Date.parse(thread.latestRun?.completedAt ?? thread.updatedAt)));
   const resetPassed = useDeadlinePassed(resetAt === null ? null : Date.parse(resetAt));
   const runId = thread.latestRun?.runId;
   const recovery = thread.limitRecovery;
@@ -92,8 +94,8 @@ export function UsageLimitRecoveryCard({
       snoozedUntil: thread.snoozedUntil,
     }) && !resetPassed;
   async function toggle(action: "resume" | "snooze") {
-    if (!resetAt || !runId || !canSchedule) return;
-    if (action === "snooze" && !snoozed && Date.parse(resetAt) <= Date.now()) {
+    if (!runId || !canSchedule || (!resetAt && action === "snooze")) return;
+    if (action === "snooze" && resetAt !== null && !snoozed && Date.parse(resetAt) <= Date.now()) {
       setError(gt("The reset time has passed. Retry the thread manually."));
       return;
     }
@@ -106,6 +108,7 @@ export function UsageLimitRecoveryCard({
         limitRecovery: {
           runId,
           resetAt,
+          ...(proxyRecoveryId ? { proxyRecoveryId } : {}),
           ...(action === "resume" ? { autoResume: !scheduled } : { snooze: !snoozed }),
         },
       },
@@ -181,9 +184,11 @@ export function UsageLimitRecoveryCard({
                   : resetPassed
                     ? gt("Usage limit reached. Reset {date}.", { date: resetDate })
                     : gt("Usage limit reached. Resets {date}.", { date: resetDate })
-                : gt(
-                    "Usage limit reached. The provider did not report a reset time. Retry manually when your limit is available.",
-                  )}
+                : proxyRecoveryId
+                  ? gt("Waiting for provider availability.")
+                  : gt(
+                      "Usage limit reached. The provider did not report a reset time. Retry manually when your limit is available.",
+                    )}
         </Text>
         {chatGptLimit || canSchedule ? (
           // The margins cancel the 44pt touch height so the links sit 8pt under the text.
@@ -204,14 +209,16 @@ export function UsageLimitRecoveryCard({
                       ? gt("Cancel auto-resume")
                       : resetPassed
                         ? gt("Resume now")
-                        : gt("Resume at reset")
+                        : proxyRecoveryId
+                          ? gt("Resume when available")
+                          : gt("Resume at reset")
                   }
                   disabled={pending}
                   onPress={() => void toggle("resume")}
                 />
                 <RecoveryAction
                   label={snoozed ? gt("Wake now") : gt("Snooze until reset")}
-                  disabled={pending || (!snoozed && resetPassed)}
+                  disabled={pending || resetAt === null || (!snoozed && resetPassed)}
                   onPress={() => void toggle("snooze")}
                 />
               </>

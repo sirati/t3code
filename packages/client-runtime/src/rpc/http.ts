@@ -1,8 +1,10 @@
 import { MarkedText, markedTextEnglish, translatableMessage } from "../errors/translatable.ts";
 import { msg } from "gt-i18n";
 import {
+  CLIENT_CAPABILITIES_QUERY_PARAM,
   EnvironmentHttpApi,
   EnvironmentHttpCommonError,
+  PROXY_LIMIT_RECOVERY_CAPABILITY,
   type EnvironmentAuthInvalidError,
   type EnvironmentConnectApprovalPendingError,
   type EnvironmentInternalError,
@@ -17,7 +19,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import { FetchHttpClient, HttpClient, HttpClientError } from "effect/http";
+import { FetchHttpClient, HttpClient, HttpClientError, HttpClientRequest } from "effect/http";
 import * as HttpApiClient from "effect/http-api/HttpApiClient";
 
 const isEnvironmentHttpCommonError = Schema.is(EnvironmentHttpCommonError);
@@ -113,9 +115,31 @@ const remoteApiBaseUrl = (httpBaseUrl: string): string => {
   return url.toString();
 };
 
+// HTTP requests carry no socket URL, so orchestration requests, whose answers hold thread records,
+// declare this wire shape as a query parameter. It is a parameter, not a header, because a header
+// outside the CORS allowlist fails the preflight to other servers.
+const isOrchestrationRequest = (url: string) => url.includes("/api/orchestration/");
+
+/** The URL an orchestration request sends, for signing; other URLs are returned as is. */
+export const withProxyLimitRecoveryCapability = (url: string): string =>
+  isOrchestrationRequest(url)
+    ? `${url}${url.includes("?") ? "&" : "?"}${CLIENT_CAPABILITIES_QUERY_PARAM}=${PROXY_LIMIT_RECOVERY_CAPABILITY}`
+    : url;
+
+const declareProxyLimitRecovery = HttpClient.mapRequest((request) =>
+  isOrchestrationRequest(request.url)
+    ? HttpClientRequest.appendUrlParam(
+        request,
+        CLIENT_CAPABILITIES_QUERY_PARAM,
+        PROXY_LIMIT_RECOVERY_CAPABILITY,
+      )
+    : request,
+);
+
 export const makeEnvironmentHttpApiClient = (httpBaseUrl: string) =>
   HttpApiClient.make(EnvironmentHttpApi, {
     baseUrl: remoteApiBaseUrl(httpBaseUrl),
+    transformClient: declareProxyLimitRecovery,
   });
 
 export const makeEnvironmentHttpApiGroupClient = <
@@ -126,7 +150,7 @@ export const makeEnvironmentHttpApiGroupClient = <
 ) =>
   Effect.flatMap(HttpClient.HttpClient, (httpClient) =>
     HttpApiClient.group(EnvironmentHttpApi, {
-      httpClient,
+      httpClient: declareProxyLimitRecovery(httpClient),
       group,
       baseUrl: remoteApiBaseUrl(httpBaseUrl),
     }),

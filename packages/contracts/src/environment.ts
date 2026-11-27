@@ -21,6 +21,11 @@ export const CLIENT_CAPABILITIES_QUERY_PARAM = "clientCapabilities";
 export const SETTINGS_SECRET_REFERENCES_CAPABILITY = "settingsSecretReferences";
 /** Usage limit sources may be of kind "http", not only "cliproxy". */
 export const HTTP_USAGE_LIMIT_SOURCES_CAPABILITY = "httpUsageLimitSources";
+/**
+ * A thread's `limitRecovery` may wait for a cliproxy route instead of a reset time
+ * (`resetAt: null`). Also accepted as a query parameter on HTTP requests.
+ */
+export const PROXY_LIMIT_RECOVERY_CAPABILITY = "proxyLimitRecovery";
 
 export const ExecutionEnvironmentPlatformOs = Schema.Literals([
   "darwin",

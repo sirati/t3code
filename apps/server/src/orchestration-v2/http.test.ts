@@ -1,19 +1,25 @@
 import {
   AuthSessionId,
   type AuthEnvironmentScope,
+  CLIENT_CAPABILITIES_QUERY_PARAM,
   EnvironmentAuthenticatedAuth,
   EnvironmentAuthenticatedPrincipal,
   EnvironmentHttpApi,
   EnvironmentId,
   EventId,
+  IsoDateTime,
   ORCHESTRATION_PROTOCOL_HEADER,
   ORCHESTRATION_PROTOCOL_VERSION_TEXT,
   OrchestrationV2AppThread,
+  OrchestrationV2LimitRecovery,
   OrchestrationV2Run,
   OrchestrationV2ThreadDetailSnapshot,
+  OrchestrationV2ThreadShell,
   OrchestrationV2TurnItem,
   OrchestrationV2ThreadTranscript,
   PROVIDER_SEND_TURN_MAX_FILE_BYTES,
+  PROXY_LIMIT_RECOVERY_CAPABILITY,
+  RunId,
   ThreadId,
 } from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
@@ -22,6 +28,7 @@ import * as Effect from "effect/Effect";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Layer from "effect/Layer";
+import * as Exit from "effect/Exit";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as Statement from "effect/sql/Statement";
@@ -38,6 +45,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as OrchestrationEventStore from "../persistence/OrchestrationEventStore.ts";
 import { ProjectEnrichmentService } from "../project/ProjectEnrichmentService.ts";
 import * as OrchestrationHttp from "./http.ts";
+import * as ProxyLimitRecoveryWire from "./ProxyLimitRecoveryWire.ts";
 import { OrchestratorProjectionError } from "./Orchestrator.ts";
 import { EventSinkV2 } from "./EventSink.ts";
 import * as ProjectStore from "./ProjectStore.ts";
@@ -156,6 +164,7 @@ const serveOrchestrationHttp = (
     });
     const routes = HttpApiBuilder.layer(TranscriptTestApi).pipe(
       Layer.provide(OrchestrationHttp.layer),
+      Layer.provide(ProxyLimitRecoveryWire.layerApiResponses),
       Layer.provide(
         Layer.succeed(ServerEnvironment.ServerEnvironmentIdentity, {
           getEnvironmentId: Effect.succeed(environmentId),
@@ -426,6 +435,83 @@ it.effect("streams the full snapshot with the endpoint's errors", () =>
     const rejected = yield* read(unencodable.handler, thread.id);
     expect(rejected.status).toBe(500);
     expect(yield* Effect.promise(() => rejected.text())).toBe("");
+  }),
+);
+
+// What an upstream client reads: every thread's recovery needs a reset time.
+const UpstreamThreadShell = OrchestrationV2ThreadShell.mapFields((fields) => ({
+  ...fields,
+  limitRecovery: Schema.optional(
+    Schema.NullOr(
+      OrchestrationV2LimitRecovery.mapFields((recovery) => ({ ...recovery, resetAt: IsoDateTime })),
+    ),
+  ),
+}));
+const decodeUpstreamShellThreads = Schema.decodeUnknownExit(
+  Schema.Array(Schema.toCodecJson(UpstreamThreadShell)),
+);
+
+it.effect("sends a recovery that waits for a proxy only to clients that declare it", () =>
+  Effect.gen(function* () {
+    const { eventSink, handler } = yield* serveOrchestrationHttp(() => true);
+    const id = ThreadId.make("proxy-thread");
+    yield* eventSink.write({
+      events: [
+        {
+          id: EventId.make("create-proxy-thread"),
+          type: "thread.created" as const,
+          threadId: id,
+          occurredAt: now,
+          payload: {
+            ...thread,
+            id,
+            lineage: { ...thread.lineage, rootThreadId: id },
+            limitRecovery: {
+              runId: RunId.make("run:proxy"),
+              resetAt: null,
+              proxyRecoveryId: "VPtGt5Jw_bjye8rJ",
+              autoResume: true,
+            },
+          },
+        },
+      ],
+    });
+    const get = (path: string) =>
+      Effect.promise(async () => {
+        const response = await handler(
+          new Request(`http://localhost${path}`, {
+            headers: { [ORCHESTRATION_PROTOCOL_HEADER]: ORCHESTRATION_PROTOCOL_VERSION_TEXT },
+          }),
+        );
+        expect(response.status).toBe(200);
+        return (await response.json()) as {
+          readonly threads?: ReadonlyArray<{
+            readonly id: string;
+            readonly limitRecovery?: unknown;
+          }>;
+          readonly projection?: { readonly thread: { readonly limitRecovery?: unknown } };
+        };
+      });
+    const declared = `?${CLIENT_CAPABILITIES_QUERY_PARAM}=${PROXY_LIMIT_RECOVERY_CAPABILITY}`;
+    const recoveryOf = (shell: Effect.Success<ReturnType<typeof get>>) =>
+      shell.threads?.find((row) => row.id === id)?.limitRecovery;
+
+    const upstreamShell = yield* get("/api/orchestration/shell");
+    expect(recoveryOf(upstreamShell)).toBeNull();
+    expect(Exit.isSuccess(decodeUpstreamShellThreads(upstreamShell.threads))).toBe(true);
+    const forkShell = yield* get(`/api/orchestration/shell${declared}`);
+    expect(recoveryOf(forkShell)).toMatchObject({
+      resetAt: null,
+      proxyRecoveryId: "VPtGt5Jw_bjye8rJ",
+    });
+    // The answer every client got before: an upstream client cannot read any of its threads.
+    expect(Exit.isFailure(decodeUpstreamShellThreads(forkShell.threads))).toBe(true);
+
+    // The thread snapshot streams its body.
+    const upstreamThread = yield* get(`/api/orchestration/threads/${id}`);
+    expect(upstreamThread.projection?.thread.limitRecovery).toBeNull();
+    const forkThread = yield* get(`/api/orchestration/threads/${id}${declared}`);
+    expect(forkThread.projection?.thread.limitRecovery).toMatchObject({ resetAt: null });
   }),
 );
 

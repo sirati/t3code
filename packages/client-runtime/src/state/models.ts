@@ -123,6 +123,7 @@ export interface ThreadRuntimeSummary {
   /** The record `lastError` came from, with its change time so a repeated failure differs. */
   readonly lastErrorSource?: string | null;
   readonly usageLimitResetAt?: string | null;
+  readonly proxyRecoveryId?: string | null;
   readonly updatedAt: string;
 }
 
@@ -264,6 +265,7 @@ function shellRuntime(thread: OrchestrationV2ThreadShell): ThreadRuntimeSummary 
     lastErrorClass: thread.lastErrorClass ?? null,
     lastErrorCode: thread.lastErrorCode ?? null,
     usageLimitResetAt: thread.usageLimitResetAt ?? null,
+    proxyRecoveryId: thread.proxyRecoveryId ?? null,
     updatedAt: iso(thread.updatedAt),
   };
 }
